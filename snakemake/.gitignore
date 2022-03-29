@@ -1,0 +1,8 @@
+/.snakemake/
+/alignment/
+/conda_env/
+/espresso_out/
+/fastq_dir/
+/references/
+/visualization/
+__pycache__/

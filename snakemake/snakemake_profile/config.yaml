@@ -1,0 +1,35 @@
+# Commenting out 'cluster' will force jobs to be run locally.
+# '>-' is yaml syntax for splitting a string over multiple lines
+cluster: >-
+  python ./snakemake_profile/cluster_submit.py
+  --retry-submit-interval-seconds 30,120,300
+  --resource-usage-dir ./snakemake_profile/job_resource_usage
+cluster-status: >-
+  python ./snakemake_profile/cluster_status.py
+  --resource-usage-dir ./snakemake_profile/job_resource_usage
+  --resource-usage-min-interval 120
+
+# 'jobs' has two interpretations:
+#  * if running with 'cluster'
+#    + max number of jobs concurrently submitted to the cluster
+#  * else
+#    + max number of local cores to use
+jobs: 100
+
+# 'resources' defines limits that apply to both local and 'cluster' jobs.
+# 'resources' is commented out when using 'cluster' to allow the cluster
+# scheduler to determine the available memory.
+# resources:
+#   - 'mem_mb=16384'
+
+# wait up to a minute for result files to be visible through the shared filesystem
+latency-wait: 60
+
+# Allow a failed job to be re-started once
+restart-times: 1
+
+# output settings
+verbose: false
+printshellcmds: true
+show-failed-logs: true
+reason: true

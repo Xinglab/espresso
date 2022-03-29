@@ -1,0 +1,27 @@
+#!/bin/bash
+# conda_wrapper activates the conda environment and then
+# executes its arguments in that environment.
+
+function set_script_dir() {
+  local ORIG_DIR="$(pwd)" || return 1
+
+  local REL_SCRIPT_DIR="$(dirname ${BASH_SOURCE[0]})" || return 1
+  cd "${REL_SCRIPT_DIR}" || return 1
+  SCRIPT_DIR="$(pwd)" || return 1
+  cd "${ORIG_DIR}" || return 1
+}
+
+function main() {
+  set_script_dir || return 1
+  source "${SCRIPT_DIR}/set_env_vars.sh" || return 1
+
+  conda activate "${CONDA_ENV_PREFIX}" || return 1
+
+  "$@"
+  local RETURN_VALUE="$?"
+
+  conda deactivate || return 1
+  return "${RETURN_VALUE}"
+}
+
+main "$@"

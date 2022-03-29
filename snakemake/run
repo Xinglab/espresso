@@ -1,0 +1,3 @@
+#!/bin/bash
+
+./conda_wrapper snakemake --profile ./snakemake_profile
