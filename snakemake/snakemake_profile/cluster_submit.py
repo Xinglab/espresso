@@ -2,13 +2,12 @@ import argparse
 import math
 import os
 import os.path
-import subprocess
 import sys
-import time
 
 from snakemake.utils import read_job_properties
 
 import cluster_commands
+import try_command
 
 
 def parse_args():
@@ -92,6 +91,8 @@ def build_submit_command(jobscript, job_properties, cluster_log_out,
     mem_mb_per_thread = None
     if resources:
         time_hours = resources.get('time_hours')
+        gpus = resources.get('gpus')
+        gpu_name = resources.get('gpu_name')
         mem_mb = resources.get('mem_mb')
         mem_mb_per_thread = mem_mb
         if mem_mb and threads:
@@ -100,45 +101,17 @@ def build_submit_command(jobscript, job_properties, cluster_log_out,
 
     return cluster_commands.submit_command(cluster_log_out, cluster_log_err,
                                            threads, time_hours, mem_mb,
-                                           mem_mb_per_thread, jobscript)
-
-
-def try_run_submit_command(command):
-    completed_process = subprocess.run(command,
-                                       check=False,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE)
-    decoded_stdout = completed_process.stdout.decode()
-    decoded_stderr = completed_process.stderr.decode()
-    if completed_process.returncode != 0:
-        return None, 'stdout:\n{}\n\nstderr:\n{}'.format(
-            decoded_stdout, decoded_stderr)
-
-    return decoded_stdout, None
+                                           mem_mb_per_thread, gpus, gpu_name,
+                                           jobscript)
 
 
 def run_submit_command(command, retry_submit_interval_seconds):
-    errors = list()
+    stdout, error = try_command.try_command(command,
+                                            retry_submit_interval_seconds)
+    if error:
+        sys.exit(error)
 
-    # The final (retry_seconds: None) allows running the command, but
-    # without the ability to wait and retry.
-    retry_submit_interval_seconds = retry_submit_interval_seconds + [None]
-    for retry_seconds in retry_submit_interval_seconds:
-        stdout, error = try_run_submit_command(command)
-        if not error:
-            return stdout
-
-        errors.append(error)
-        if retry_seconds is not None:
-            time.sleep(retry_seconds)
-            continue
-        else:
-            break
-
-    for i, error in enumerate(errors):
-        print('attempt {}\n{}'.format(i, error), file=sys.stderr)
-
-    sys.exit(1)
+    return stdout
 
 
 def extract_job_id(stdout):

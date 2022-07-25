@@ -2,7 +2,7 @@ import bs4
 
 
 def submit_command(log_out, log_err, threads, time_hours, mem_mb,
-                   mem_mb_per_thread, jobscript):
+                   mem_mb_per_thread, gpus, gpu_name, jobscript):
     command = ['qsub', '-o', log_out, '-e', log_err]
     if threads:
         command.extend(['-pe', 'smp', str(threads)])

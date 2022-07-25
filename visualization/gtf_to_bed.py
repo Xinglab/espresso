@@ -61,6 +61,7 @@ def remove_quotes(string):
 def get_transcript_id_from_attribute_string(string):
     attribute_pairs = string.split(';')
     for attribute_pair in attribute_pairs:
+        attribute_pair = attribute_pair.strip()
         first_space = attribute_pair.find(' ')
         if first_space <= 0:
             continue
@@ -89,6 +90,10 @@ def gtf_to_bed_with_file_handles(in_gtf, out_bed, descriptive_name):
     transcript_id = ''
     for line in in_gtf:
         in_columns = line.strip().split('\t')
+        if in_columns[0].startswith('#'):
+            # skip comment lines
+            continue
+
         in_seq = in_columns[0]
         # in_source = in_columns[1]
         in_feature = in_columns[2]

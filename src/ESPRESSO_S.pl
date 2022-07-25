@@ -1,8 +1,16 @@
 use strict;
 use threads;
+use threads::shared;
+use Thread::Queue;
 use Getopt::Long;
+use Storable qw(freeze thaw);
 
-my $version = 'S_alpha1.2.2';
+use File::Basename qw(dirname);
+use lib dirname(__FILE__);
+use ESPRESSO_Version;
+
+my $version_number = ESPRESSO_Version::get_version_number();
+my $version_string = "S_$version_number";
 my ($help, $sam, $in, $list_samples, $fa, $anno, $out, $SJ_bed, $read_num_cutoff, $read_ratio_cutoff, $group_extra_range, $num_thread, $mapq_cutoff, $keep_tmp, 
 	$cont_del_max, $chrM, $inserted_cont_cutoff, $SJFS_dist, $SJFS_dist_add);
 
@@ -36,7 +44,7 @@ Getopt::Long::GetOptions (
 if (defined($help)) {
 	print "
 Program:  ESPRESSO (Error Statistics PRomoted Evaluator of Splice Site Options)
-Version:  $version
+Version:  $version_string
 Contact:  Yuan Gao <gaoy\@email.chop.edu, gy.james\@163.com>
 
 Usage:    perl ESPRESSO_S.pl -L samples.tsv -F ref.fa -A anno.gtf -O work_dir
@@ -109,6 +117,15 @@ Arguments:
 	$chrM = 'chrM' if !defined $chrM;
 	$cont_del_max = 50 if !defined $cont_del_max;
 
+	my @worker_threads;
+	my @thread_input_queues;
+	my @thread_output_queues;
+	for (1 .. $num_thread) {
+		push @thread_input_queues, Thread::Queue->new();
+		push @thread_output_queues, Thread::Queue->new();
+		my $thread = threads->new({'context' => 'void'}, \&thread_work_loop, [$thread_input_queues[-1], $thread_output_queues[-1]]);
+		push @worker_threads, $thread;
+	}
 
 	my @warn_reason;
 	my @die_reason;
@@ -247,26 +264,44 @@ Arguments:
 	my $output_title = join "\t", @output_titles;
 	my %output_titles_ID;
 	$output_titles_ID{$output_titles[$_]} = $_ for 0 .. $#output_titles;
-	my @ths;
 
-	for my $th_ref (@{$sam_distr_ref}) {
-		# $th_ref is the reference to the array of distributed sam files in this thread
-		my $th = threads -> new({'context' => 'void'}, \&parallel_scan_prep, [$th_ref,1]);
-		my $th_id = $th->tid();
-		print " Worker $th_id begins to scan: \n @{$th_ref}\n";
-		unshift @ths, $th;
+	{ # limit scope of variables used to pass arguments to threads
+		my %inputs_for_all_threads;
+		$inputs_for_all_threads{'scan_number'} = 1;
+		$inputs_for_all_threads{'file_ID'} = \%file_ID;
+		$inputs_for_all_threads{'out'} = $out;
+		$inputs_for_all_threads{'mapq_cutoff'} = $mapq_cutoff;
+		$inputs_for_all_threads{'chrM'} = $chrM;
+		$inputs_for_all_threads{'cont_del_max'} = $cont_del_max;
+		$inputs_for_all_threads{'chr_seq_len'} = \%chr_seq_len;
+		$inputs_for_all_threads{'inserted_cont_cutoff'} = $inserted_cont_cutoff;
+		$inputs_for_all_threads{'group_extra_range'} = $group_extra_range;
+		$inputs_for_all_threads{'SJFS_dist'} = $SJFS_dist;
+		$inputs_for_all_threads{'chr_seq'} = \%chr_seq;
+		$inputs_for_all_threads{'sep_SJ'} = $sep_SJ;
+		my $serialized_inputs_for_all_threads :shared;
+		$serialized_inputs_for_all_threads = freeze(\%inputs_for_all_threads);
+		%inputs_for_all_threads = ();
+
+		for my $thread_i (0 .. $#{$sam_distr_ref}) {
+			my $files_for_thread = $sam_distr_ref->[$thread_i];
+			my $serialized_files_for_thread :shared;
+			$serialized_files_for_thread = freeze($files_for_thread);
+			my %thread_input :shared;
+			$thread_input{'files_for_thread'} = $serialized_files_for_thread;
+			$thread_input{'inputs_for_all_threads'} = $serialized_inputs_for_all_threads;
+			$thread_input_queues[$thread_i]->enqueue(\%thread_input);
+			print "Worker $thread_i begins to scan: \n @{$files_for_thread}\n";
+		}
 	}
 
-
-	for (@ths) {
-		my $th_id = $_->tid();
-		$_ -> join();
-		print " Worker $th_id finished reporting.\n";
+	for my $thread_i (0 .. $#{$sam_distr_ref}) {
+		# dequeue() will block until the worker thread signals that it's done
+		$thread_output_queues[$thread_i]->dequeue();
+		print "Worker $thread_i finished reporting.\n";
 	}
-	@ths = ();
 
 	print  '['.scalar(localtime)."] Re-cluster all reads\n";
-
 
 	my (%SJ_all_info, %SJ_group);
 	my (@group_sort_update, @group_all_info, %chr_group, %group_sep_in_all);
@@ -541,8 +576,6 @@ Arguments:
 
 	%chr_seq = ();
 	%anno_SJ = ();
-	my @ths2;
-
 
 	print "$_($file_ID{$_})\n" for keys %file_ID;
 	my $x = 0;
@@ -551,50 +584,82 @@ Arguments:
 		last if $x>5;
 		print "$_($group_sep_in_all{$_})\n";
 	}
-	for my $th_ref (@{$sam_distr_ref}) {
-		# $th_ref is the reference to the array of distributed sam files in this thread
-		my $th = threads -> new({'context' => 'void'}, \&parallel_scan_prep, [$th_ref,2]);
-		my $th_id = $th->tid();
-		print " Worker $th_id begins to scan: \n @{$th_ref}\n";
-		push @ths2, $th;
+
+	{ # limit scope of variables used to pass arguments to threads
+		my %inputs_for_all_threads;
+		$inputs_for_all_threads{'scan_number'} = 2;
+		$inputs_for_all_threads{'file_ID'} = \%file_ID;
+		$inputs_for_all_threads{'out'} = $out;
+		$inputs_for_all_threads{'output_titles_ID'} = \%output_titles_ID;
+		$inputs_for_all_threads{'group_sep_in_all'} = \%group_sep_in_all;
+		$inputs_for_all_threads{'sep_SJ'} = $sep_SJ;
+		$inputs_for_all_threads{'keep_tmp'} = $keep_tmp;
+		my $serialized_inputs_for_all_threads :shared;
+		$serialized_inputs_for_all_threads = freeze(\%inputs_for_all_threads);
+		%inputs_for_all_threads = ();
+
+		for my $thread_i (0 .. $#{$sam_distr_ref}) {
+			my $files_for_thread = $sam_distr_ref->[$thread_i];
+			my $serialized_files_for_thread :shared;
+			$serialized_files_for_thread = freeze($files_for_thread);
+			my %thread_input :shared;
+			$thread_input{'files_for_thread'} = $serialized_files_for_thread;
+			$thread_input{'inputs_for_all_threads'} = $serialized_inputs_for_all_threads;
+			$thread_input_queues[$thread_i]->enqueue(\%thread_input);
+			print "Worker $thread_i begins to scan: \n @{$files_for_thread}\n";
+		}
 	}
 
-	
-	for (@ths2) {
-		my $th_id = $_->tid();
-		$_ -> join();
-		print " Worker $th_id finished reporting.\n";
+	for my $thread_i (0 .. $#{$sam_distr_ref}) {
+		# dequeue() will block until the worker thread signals that it's done
+		$thread_output_queues[$thread_i]->dequeue();
+		print "Worker $thread_i finished reporting.\n";
 	}
-	@ths2 = ();
+
+	# cleanup threads
+	for my $thread_i (0 .. $#worker_threads) {
+		# the worker thread will see 'undef' on its queue after end() and exit
+		$thread_input_queues[$thread_i]->end();
+		$worker_threads[$thread_i]->join();
+	}
+
 	print  '[', scalar(localtime), "] ESPRESSO_S finished its work.\n";
 
 	sub parallel_scan_prep {
-		my ($files_ref, $scan_num, $ref_file, $ref_group_sep_in_all);
-		($files_ref, $scan_num) = @{$_[0]};
+		my $main_input_ref = $_[0];
+		my $files_ref = thaw($main_input_ref->{'files_for_thread'});
+		my $all_input_ref = thaw($main_input_ref->{'inputs_for_all_threads'});
+		my $scan_num = $all_input_ref->{'scan_number'};
 
 		for my $file (@{$files_ref}) {
 			if ($file =~ /sam$/i) {
 				if ($scan_num == 1) {
-					&parallel_scan1([$file, 'sam']);
+					&parallel_scan1([$file, 'sam', $all_input_ref]);
 				} else {
-					&parallel_scan2([$file, 'sam']);
+					&parallel_scan2([$file, 'sam', $all_input_ref]);
 				}
-				
+
 			} else {
 				if ($scan_num == 1) {
-					&parallel_scan1([$file, 'bam']);
+					&parallel_scan1([$file, 'bam', $all_input_ref]);
 				} else {
-					&parallel_scan2([$file, 'bam']);
+					&parallel_scan2([$file, 'bam', $all_input_ref]);
 				}
-				
+
 			}
 		}
 	}
 
 	sub parallel_scan2 {
-		my ($file, $format) = @{$_[0]};
+		my ($file, $format, $input_ref) = @{$_[0]};
+		my $file_ID_ref = $input_ref->{'file_ID'};
+		my $out = $input_ref->{'out'};
+		my $output_titles_ID_ref = $input_ref->{'output_titles_ID'};
+		my $group_sep_in_all_ref = $input_ref->{'group_sep_in_all'};
+		my $sep_SJ = $input_ref->{'sep_SJ'};
+		my $keep_tmp = $input_ref->{'keep_tmp'};
 
-		my $num = $file_ID{$file};
+		my $num = $file_ID_ref->{$file};
 		print "$file\t$num\n";
 
 		my $exit_sort = system("sort -k 3,3 $out/$num/sam.list > $out/$num/sam.list2");
@@ -609,8 +674,8 @@ Arguments:
 		while (<READ2>) {
 			chomp;
 			my @line = split /\t/;
-			next if $line[$output_titles_ID{'readID'}] eq 'readID';
-			if (defined $last_read and $last_read ne $line[$output_titles_ID{'readID'}]) {
+			next if $line[$output_titles_ID_ref->{'readID'}] eq 'readID';
+			if (defined $last_read and $last_read ne $line[$output_titles_ID_ref->{'readID'}]) {
 				my @sort_alignment = sort {${$b}[1] <=> ${$a}[1] or ${$b}[2] <=> ${$a}[2]} @last_read_alignments;
 				#my @sort_alignment_length = sort {length(${$b}[4]) <=> length(${$a}[4])} @last_read_alignments;
 				if (@sort_alignment > 1) {
@@ -627,9 +692,9 @@ Arguments:
 				$right_length_index = -1;
 			}
 
-			push @last_read_alignments, [$line[$output_titles_ID{'read_length'}], $line[$output_titles_ID{'mappedGenome'}], $line[$output_titles_ID{'mapq'}], $line[$output_titles_ID{'line_num'}], $line[$output_titles_ID{'readSeq'}]];
+			push @last_read_alignments, [$line[$output_titles_ID_ref->{'read_length'}], $line[$output_titles_ID_ref->{'mappedGenome'}], $line[$output_titles_ID_ref->{'mapq'}], $line[$output_titles_ID_ref->{'line_num'}], $line[$output_titles_ID_ref->{'readSeq'}]];
 			$right_length_index = $#last_read_alignments if length($last_read_alignments[-1][-1]) == $last_read_alignments[-1][0] and $last_read_alignments[-1][-1] ne 'NA';
-			$last_read = $line[$output_titles_ID{'readID'}];
+			$last_read = $line[$output_titles_ID_ref->{'readID'}];
 		}
 		close READ2;
 			if (defined $last_read) {
@@ -675,12 +740,12 @@ Arguments:
 		while (<READ>) {
 			chomp;
 			my @line = split /\t/;
-			next if $line[$output_titles_ID{'readID'}] eq 'readID';
-			next if exists $read_info{$line[$output_titles_ID{'readID'}]} and $read_info{$line[$output_titles_ID{'readID'}]}[1] != $line[$output_titles_ID{'line_num'}];
-			my $chr = $line[$output_titles_ID{'chr'}];
+			next if $line[$output_titles_ID_ref->{'readID'}] eq 'readID';
+			next if exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and $read_info{$line[$output_titles_ID_ref->{'readID'}]}[1] != $line[$output_titles_ID_ref->{'line_num'}];
+			my $chr = $line[$output_titles_ID_ref->{'chr'}];
 			if ($chr ne $pre_chr) {
 				%SJ_updated_all=();
-				if (length($line[$output_titles_ID{'chr'}]) <= 5) {
+				if (length($line[$output_titles_ID_ref->{'chr'}]) <= 5) {
 					open SJ2, "<", "$out/${chr}_SJ_simplified.list" or die "cannot open tmp $out/${chr}_SJ_simplified.list: $!";
 				} else {
 					open SJ2, "<", "$out/other_SJ_simplified.list" or die "cannot open tmp $out/other_SJ_simplified.list: $!";
@@ -696,9 +761,9 @@ Arguments:
 			}
 
 			$pre_chr = $chr;
-			$line[$output_titles_ID{'group_ID'}] = $group_sep_in_all{$num.'_'.$line[$output_titles_ID{'group_ID'}]};
-			if ($line[$output_titles_ID{'SJcorSeqRef'}] ne 'NA') {
-				my @SJcorSeq_strings = split ',', $line[$output_titles_ID{'SJcorSeqRef'}];
+			$line[$output_titles_ID_ref->{'group_ID'}] = $group_sep_in_all_ref->{$num.'_'.$line[$output_titles_ID_ref->{'group_ID'}]};
+			if ($line[$output_titles_ID_ref->{'SJcorSeqRef'}] ne 'NA') {
+				my @SJcorSeq_strings = split ',', $line[$output_titles_ID_ref->{'SJcorSeqRef'}];
 				for my $i (0 .. $#SJcorSeq_strings) {
 					my $SJcorSeq_string = $SJcorSeq_strings[$i];
 					my @SJcor_info = split ';', $SJcorSeq_string;
@@ -716,17 +781,17 @@ Arguments:
 					$SJcorSeq_strings[$i] = join ';', @SJcor_info;
 				}
 				
-				$line[$output_titles_ID{'SJcorSeqRef'}] = join ',', @SJcorSeq_strings;
+				$line[$output_titles_ID_ref->{'SJcorSeqRef'}] = join ',', @SJcorSeq_strings;
 			}
 			for my $i (0 .. $#line-1) {
 				print READ3 "$line[$i]\t";
 			}
 
-			if ( $line[$output_titles_ID{'readSeq'}] ne 'NA' ) {
+			if ( $line[$output_titles_ID_ref->{'readSeq'}] ne 'NA' ) {
 				print READ3 "$line[-1]\n";
-			} elsif ( $line[$output_titles_ID{'readSeq'}] eq 'NA' and exists $read_info{$line[$output_titles_ID{'readID'}]} and defined $read_info{$line[$output_titles_ID{'readID'}]}[3] ) {
-				print READ3 "$read_info{$line[$output_titles_ID{'readID'}]}[3]\n";
-			} elsif ( $line[$output_titles_ID{'readSeq'}] eq 'NA' ) {
+			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' and exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and defined $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3] ) {
+				print READ3 "$read_info{$line[$output_titles_ID_ref->{'readID'}]}[3]\n";
+			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' ) {
 				print READ3 "read_not_recorded\n";
 			}
 
@@ -738,17 +803,24 @@ Arguments:
 			unlink "$out/$num/sam.list";
 			unlink "$out/$num/sam.list2";
 		}
-
 	}
 
 	sub parallel_scan1 {
-		my ($file, $format, $key_read);
-		if (@{$_[0]} == 3) {
-			($file, $format, $key_read) = @{$_[0]};
-		} else {
-			($file, $format) = @{$_[0]};
-		}
-		my $num = $file_ID{$file};
+		my ($file, $format, $input_ref) = @{$_[0]};
+		my $file_ID_ref = $input_ref->{'file_ID'};
+		my $out = $input_ref->{'out'};
+		my $mapq_cutoff = $input_ref->{'mapq_cutoff'};
+		my $chrM = $input_ref->{'chrM'};
+		my $cont_del_max = $input_ref->{'cont_del_max'};
+		my $chr_seq_len_ref = $input_ref->{'chr_seq_len'};
+		my $inserted_cont_cutoff = $input_ref->{'inserted_cont_cutoff'};
+		my $group_extra_range = $input_ref->{'group_extra_range'};
+		my $SJFS_dist = $input_ref->{'SJFS_dist'};
+		my $chr_seq_ref = $input_ref->{'chr_seq'};
+		my $sep_SJ = $input_ref->{'sep_SJ'};
+
+		my $key_read;
+		my $num = $file_ID_ref->{$file};
 		my $file_base = substr($file, rindex($file,'/')+1);
 		my $pinhead;
 
@@ -790,10 +862,10 @@ Arguments:
 					
 					$line[11] =~ /NM:i:(\d+)/;
 					my $NM_num = $1;
-					die if !exists $chr_seq_len{$line[2]};
+					die if !exists $chr_seq_len_ref->{$line[2]};
 					if (${$msidn}{'max_I'} >= $inserted_cont_cutoff){
 						next;
-					} elsif ($line[3] - 1 + ${$msidn}{'mappedGenomeN'} > $chr_seq_len{$line[2]}) {
+					} elsif ($line[3] - 1 + ${$msidn}{'mappedGenomeN'} > $chr_seq_len_ref->{$line[2]}) {
 						next;
 					}
 
@@ -833,9 +905,9 @@ Arguments:
 						}
 						%SJ_read = ();
 						@pre_group = ();
-						$pre_chr_end = [ $line[2], &max($line[3]-$group_extra_range, 0), &min($end+$group_extra_range, $chr_seq_len{$line[2]}) ];
-					} elsif (${$pre_chr_end}[2] < &min($end+$group_extra_range, $chr_seq_len{$line[2]})) {
-						${$pre_chr_end}[2] = &min($end+$group_extra_range, $chr_seq_len{$line[2]});
+						$pre_chr_end = [ $line[2], &max($line[3]-$group_extra_range, 0), &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]}) ];
+					} elsif (${$pre_chr_end}[2] < &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]})) {
+						${$pre_chr_end}[2] = &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]});
 					}
 					push @pre_group, $line[0];
 
@@ -885,7 +957,7 @@ Arguments:
 								if (${$M_info}[2] < $SJFS_dist) {
 									$substr_length -= $SJFS_dist-${$M_info}[2];
 									if ($substr_length > 0) {
-										$seq_ref = substr($chr_seq{$line[2]}, $exon_end2+$SJFS_dist, $substr_length);
+										$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2+$SJFS_dist, $substr_length);
 										$seq_read = substr($line[9], ${$M_info}[3]+($SJFS_dist-${$M_info}[2]), $substr_length);
 									} else {
 										print DEFAULT "\tNA";
@@ -895,7 +967,7 @@ Arguments:
 									
 								} else {
 									if ($substr_length > 0) {
-										$seq_ref = substr($chr_seq{$line[2]}, $exon_end2 + ${$M_info}[2], $substr_length);
+										$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2 + ${$M_info}[2], $substr_length);
 										$seq_read = substr($line[9], ${$M_info}[3], $substr_length);
 									} else {
 										print DEFAULT "\tNA";
@@ -937,11 +1009,11 @@ Arguments:
 								my ($seq_ref, $seq_read);
 								my $substr_current_num = 0;
 								if (${$M_info}[1] + ${$M_info}[0] > $SJFS_dist) {
-									$seq_ref = substr($chr_seq{$line[2]}, $exon_end-$SJFS_dist, $SJFS_dist-${$M_info}[1]);
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end-$SJFS_dist, $SJFS_dist-${$M_info}[1]);
 									$seq_read = substr($line[9], ${$M_info}[3]+${$M_info}[0]-($SJFS_dist-${$M_info}[1]), $SJFS_dist-${$M_info}[1]);
 									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
 								} else {
-									$seq_ref = substr($chr_seq{$line[2]}, $exon_end - ${$M_info}[1]-${$M_info}[0], ${$M_info}[0]);
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end - ${$M_info}[1]-${$M_info}[0], ${$M_info}[0]);
 									$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
 									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
 								}
@@ -972,11 +1044,11 @@ Arguments:
 								my ($seq_ref, $seq_read);
 								my $substr_current_num = 0;
 								if (${$M_info}[2] + ${$M_info}[0] > $SJFS_dist) {
-									$seq_ref = substr($chr_seq{$line[2]}, $exon_end + ${$M_info}[2], $SJFS_dist-${$M_info}[2]);
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], $SJFS_dist-${$M_info}[2]);
 									$seq_read = substr($line[9], ${$M_info}[3], $SJFS_dist-${$M_info}[2]);
 									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
 								} else {
-									$seq_ref = substr($chr_seq{$line[2]}, $exon_end + ${$M_info}[2], ${$M_info}[0]);
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], ${$M_info}[0]);
 									$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
 									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
 								}
@@ -1074,7 +1146,6 @@ Arguments:
 		close SJ;
 		#unlink("$out/$file_base");
 		#close DEFAULT;
-		
 	}
 
 	sub thread_distribution {
@@ -1209,4 +1280,12 @@ Arguments:
 
 	sub hamming_distance{ length( $_[0] ) - ( ($_[0] ^ $_[1]) =~ tr[\0][\0] ) };
 
+	sub thread_work_loop {
+		my ($input_queue, $output_queue) = @{$_[0]};
+		while (defined(my $work_details = $input_queue->dequeue())) {
+			&parallel_scan_prep($work_details);
+			$output_queue->enqueue(1);  # signal that work is done
+		}
+		$output_queue->end();
+	}
 }

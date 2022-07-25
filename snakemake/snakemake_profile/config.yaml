@@ -6,8 +6,9 @@ cluster: >-
   --resource-usage-dir ./snakemake_profile/job_resource_usage
 cluster-status: >-
   python ./snakemake_profile/cluster_status.py
+  --retry-status-interval-seconds 30,120,300
   --resource-usage-dir ./snakemake_profile/job_resource_usage
-  --resource-usage-min-interval 120
+  --resource-usage-min-interval 300
 
 # 'jobs' has two interpretations:
 #  * if running with 'cluster'
@@ -31,5 +32,5 @@ restart-times: 1
 # output settings
 verbose: false
 printshellcmds: true
-show-failed-logs: true
+show-failed-logs: false
 reason: true
