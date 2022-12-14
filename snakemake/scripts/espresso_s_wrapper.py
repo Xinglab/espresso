@@ -6,9 +6,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=('Wrapper to write the tsv needed to run ESPRESSO_S'))
     parser.add_argument(
-        '--sams', help='comma separated paths of sam files for each input')
-    parser.add_argument('--sample-names',
-                        help='comma separated sample names for each input')
+        '--s-input',
+        help=('a txt file where 1st line is comma separated paths of sam files'
+              ' for each input, and 2nd line is comma separated sample names'
+              ' for each input'))
     parser.add_argument('--out-tsv',
                         help='the path of the sample tsv to write')
     parser.add_argument('--command',
@@ -26,9 +27,19 @@ def write_sample_tsv(sams, sample_names, file_name):
             f_handle.write('{}\n'.format(columns))
 
 
+def read_s_input(s_input):
+    with open(s_input, 'rt') as handle:
+        sams_line = handle.readline()
+        sams = sams_line.strip().split(',')
+        names_line = handle.readline()
+        names = names_line.strip().split(',')
+
+    return sams, names
+
+
 def run_espresso_s(args):
-    write_sample_tsv(args.sams.split(','), args.sample_names.split(','),
-                     args.out_tsv)
+    sams, names = read_s_input(args.s_input)
+    write_sample_tsv(sams, names, args.out_tsv)
     espresso_command = args.command + ['-L', args.out_tsv]
     subprocess.run(espresso_command, check=True)
 

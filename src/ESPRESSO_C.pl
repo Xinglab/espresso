@@ -2,7 +2,13 @@ use strict;
 use threads;
 use Getopt::Long;
 
-my $version = 'C_alpha1.2.2';
+use File::Copy;
+use File::Basename qw(dirname);
+use lib dirname(__FILE__);
+use ESPRESSO_Version;
+
+my $version_number = ESPRESSO_Version::get_version_number();
+my $version_string = "C_$version_number";
 my ($help, $in, $fa, $anno, $out, $target_ID, $num_thread, $mapq_cutoff, $keep_tmp, $proc_num_cutoff, $is_stranded,
 	$cont_del_max, $chrM, $inserted_cont_cutoff, $first_exon_diff_cutoff, $SJFS_dist, $SJFS_dist_add, $align_length_ratio_cutoff, $fold_end_length_lost_cutoff,
 	$correct_suggest_SJ_distance_max, $confirm_prob_fold_cutoff, $evalue_cor, $second_exon_align_length_ratio_cutoff, $length4nhmmer_max,
@@ -40,7 +46,7 @@ Getopt::Long::GetOptions (
 if (defined($help)) {
 	print "
 Program:  ESPRESSO (Error Statistics PRomoted Evaluator of Splice Site Options)
-Version:  $version
+Version:  $version_string
 Contact:  Yuan Gao <gaoy\@email.chop.edu, gy.james\@163.com>
 
 Usage:    perl ESPRESSO_C.pl -I work_dir -F ref.fa -X target_ID
@@ -154,6 +160,17 @@ Arguments:
 
 	printf  '['.scalar(localtime)."] Loading splice junction info\n";
 	#my %group_all_SJ;
+
+	# Sort the alignments to ensure deterministic grouping of reads and SJs when calling blast.
+	# The sort columns are: -k1,1n (numeric sort of read group), -k3,3 (default sort of read ID)
+	my $in_sam_list3_path = "$in/$target_ID/sam.list3";
+	my $in_sam_list3_tmp_path = "$in_sam_list3_path" . ".tmp";
+	my $in_sam_list3_sort_command = "sort -k1,1n -k3,3 $in_sam_list3_path --output $in_sam_list3_tmp_path";
+	my $exit_sort = system($in_sam_list3_sort_command);
+	if ($exit_sort != 0) {
+		die "Failed to run '$in_sam_list3_sort_command'. Exit code is $exit_sort";
+	}
+	move($in_sam_list3_tmp_path, $in_sam_list3_path);
 
 	my %necessary_groups;
 	open LIST3, "<", "$in/$target_ID/sam.list3" or die "cannot open $in/$target_ID/sam.list3: $!";
@@ -349,6 +366,10 @@ Arguments:
 								}
 							}
 							close SJ_LIST;
+
+							# sort SJ_group.fa so that it can be read line by line along with
+							# read_group_$same_group_count.fa.
+							&sort_sj_group_fa_file("$in/$target_ID/blast_$n/SJ_group.fa", "$in/$target_ID/blast_$n/SJ_group.fa.tmp");
 						}
 						printf "$n\t%g\n", scalar(keys %group_SJ_cluster_ends), scalar(@all_info_read);
 
@@ -424,6 +445,10 @@ Arguments:
 								}
 							}
 							close SJ_LIST;
+
+							# sort SJ_group.fa so that it can be read line by line along with
+							# read_group_$same_group_count.fa.
+							&sort_sj_group_fa_file("$in/$target_ID/blast_$n/SJ_group.fa", "$in/$target_ID/blast_$n/SJ_group.fa.tmp");
 						}
 						printf "$n\t%g\n", scalar(keys %group_SJ_cluster_ends), scalar(@all_info_read);
 
@@ -550,10 +575,25 @@ Arguments:
 			
 		}
 
-
-		my @SJ_cluster_r_index_sort = sort { ${$group_SJ_cluster_ends_ref}{$a}[1] <=> ${$group_SJ_cluster_ends_ref}{$b}[1] } keys %{$group_SJ_cluster_ref};
-		my @SJ_cluster_f_index_sort = sort { ${$group_SJ_cluster_ends_ref}{$b}[0] <=> ${$group_SJ_cluster_ends_ref}{$a}[0] } keys %{$group_SJ_cluster_ref};
-
+		# Sort using both endpoints since two SJ clusters can share one endpoint
+		my @SJ_cluster_r_index_sort = sort {
+			my $a_info = ${$group_SJ_cluster_ends_ref}{$a};
+			my $a_start = $a_info->[0];
+			my $a_end = $a_info->[1];
+			my $b_info = ${$group_SJ_cluster_ends_ref}{$b};
+			my $b_start = $b_info->[0];
+			my $b_end = $b_info->[1];
+			($a_end <=> $b_end) or ($a_start <=> $b_start);
+		} keys %{$group_SJ_cluster_ref};
+		my @SJ_cluster_f_index_sort = sort {
+			my $a_info = ${$group_SJ_cluster_ends_ref}{$a};
+			my $a_start = $a_info->[0];
+			my $a_end = $a_info->[1];
+			my $b_info = ${$group_SJ_cluster_ends_ref}{$b};
+			my $b_start = $b_info->[0];
+			my $b_end = $b_info->[1];
+			($b_start <=> $a_start) or ($b_end <=> $a_end);
+		} keys %{$group_SJ_cluster_ref};
 
 		my (%max_length_cluster, %read_seq_pos, %hc_SJ);
 		my $num_mt0_index_ori = 0;
@@ -625,6 +665,9 @@ Arguments:
 					my $p = $l - $rev_p;
 					my $index_ori_pre = $SJ_cluster_r_index_sort[$p];
 					my @SJ_ends_pre_cluster = @{${$group_SJ_cluster_ends_ref}{$index_ori_pre}};
+					# This check depends on the start and end coordinates and also the
+					# order of SJ_cluster_r_index_sort. SJ_cluster_r_index_sort is in
+					# ascending order of end coordinate with start coordinate used to break ties.
 					my $dist = $SJ_ends_current_cluster[0]-$SJ_ends_pre_cluster[1];
 					if ( $max_length_cluster{$index_ori}[0]*$fold_end_length_lost_cutoff >= $dist and $dist > 0-$max_overlap_SJ_group ){
 						push @index_ori_pre_qualified, [$index_ori_pre, $dist];
@@ -673,6 +716,9 @@ Arguments:
 					my $p = $l - $rev_p;
 					my $index_ori_next = $SJ_cluster_f_index_sort[$p];
 					my @SJ_ends_next_cluster = @{${$group_SJ_cluster_ends_ref}{$index_ori_next}};
+					# This check depends on the start and end coordinates and also the
+					# order of SJ_cluster_f_index_sort. SJ_cluster_f_index_sort is in
+					# descending order of start coordinate with end coordinate used to break ties.
 					my $dist = $SJ_ends_next_cluster[0]-$SJ_ends_current_cluster[1];
 					if ( $max_length_cluster{$index_ori}[1]*$fold_end_length_lost_cutoff >= $dist and $dist > 0-$max_overlap_SJ_group ){
 						#print ALLSJ "\t$index_ori_next($dist)";
@@ -806,47 +852,86 @@ Arguments:
 			close BACKUP;
 		}
 
-		my ($current_line, $accumul_read_line, $accumul_SJ_line) = (1, 0, 0);
-		my @accumul_SJ_string = ();
+		my ($accumul_read_line, $accumul_SJ_line) = (0, 0);
+		my $blast_sj_in_path = "$out_dir/SJ_group.fa";
+		my $blast_read_in_path = "$out_dir/read_group_$same_group_count.fa";
+		open(my $blast_sj_in_handle, "<", $blast_sj_in_path);
+		open(my $blast_read_in_handle, "<", $blast_read_in_path);
+		my $blast_sj_temp_path = "$blast_sj_in_path.blast.tmp";
+		my $blast_read_temp_path = "$blast_read_in_path.blast.tmp";
+		open(my $blast_sj_temp_handle, ">", $blast_sj_temp_path);
+		open(my $blast_read_temp_handle, ">", $blast_read_temp_path);
 		for my $index_ori (0 .. $max_index) {
-			#next unless exists ${$group_SJ_cluster_ref}{$index_ori};
-			$accumul_read_line += $max_length_cluster{$index_ori}[3];
-			$accumul_SJ_line += $max_length_cluster{$index_ori}[2];
-			push @accumul_SJ_string, "-e \"SJclst:$index_ori:\"" if $max_length_cluster{$index_ori}[2]>0;
-			if ($accumul_SJ_line >= 40){ #$accumul_SJ_line*$accumul_read_line >= 100_000 or 
-				if ( $accumul_read_line>0 ){
-					my $exit_db = system("grep -A1 --no-group-separator @accumul_SJ_string $out_dir/SJ_group.fa | makeblastdb -in - -dbtype nucl -out $out_dir/current_db -title current_db");
-					if ($exit_db != 0) {
-						warn "Failed to run \"grep -A1 --no-group-separator @accumul_SJ_string $out_dir/SJ_group.fa | makeblastdb -in - -dbtype nucl -out $out_dir/current_db -title current_db\". Exit code is $exit_db";
-					}
-					my $exit_blast = system("tail -n +$current_line $out_dir/read_group_$same_group_count.fa | head -$accumul_read_line | blastn -task blastn -db $out_dir/current_db -query - -word_size 4 -reward 5 -penalty -4 -gapopen 8 -gapextend 6 -num_threads 1 -evalue $evalue_cor -dust no -soft_masking false -outfmt \"6 std btop\" >> $out_dir/read_SJ_group_$same_group_count.blast");
-					if ($exit_blast != 0) {
-						warn "Failed to run \"tail -n +$current_line $out_dir/read_group_$same_group_count.fa | head -$accumul_read_line | blastn -task blastn -db $out_dir/current_db -query - -word_size 4 -reward 5 -penalty -4 -gapopen 8 -gapextend 6 -num_threads 1 -evalue $evalue_cor -dust no -soft_masking false -outfmt \"6 std btop\" >> $out_dir/read_SJ_group_$same_group_count.blast\"($accumul_SJ_line). Exit code is $exit_blast";
-					}
-				}
+			my $cluster_read_count = $max_length_cluster{$index_ori}[3];
+			my $cluster_sj_count = $max_length_cluster{$index_ori}[2];
+			# Always read the SJ and read lines from the files.
+			# Only write them to the temp files if there are both SJs and reads
+			my $have_both_sjs_and_reads = (($cluster_sj_count > 0) and ($cluster_read_count > 0));
+			my $anything_already_written = ($accumul_read_line > 0);
+			if ($have_both_sjs_and_reads and $anything_already_written) {
+				my $estimate_of_blast_on_written = &estimate_blast_runtime($accumul_read_line, $accumul_SJ_line);
+				my $estimate_of_blast_on_new = &estimate_blast_runtime($cluster_read_count, $cluster_sj_count);
+				my $estimate_of_blast_on_combined = &estimate_blast_runtime($accumul_read_line + $cluster_read_count, $accumul_SJ_line + $cluster_sj_count);
+				my $should_run_before_writing = (($estimate_of_blast_on_written + $estimate_of_blast_on_new) < $estimate_of_blast_on_combined);
 
-				$current_line += $accumul_read_line;
-				($accumul_read_line, $accumul_SJ_line) = (0, 0);
-				@accumul_SJ_string = ();
-			}			
-		}
-
-			if ($accumul_SJ_line*$accumul_read_line >0){
-				my $exit_db = system("grep -A1 --no-group-separator @accumul_SJ_string $out_dir/SJ_group.fa | makeblastdb -in - -dbtype nucl -out $out_dir/current_db -title current_db");
-				if ($exit_db != 0) {
-					warn "Failed to run \"grep -A1 --no-group-separator @accumul_SJ_string $out_dir/SJ_group.fa | makeblastdb -in - -dbtype nucl -out $out_dir/current_db -title current_db\". Exit code is $exit_db";
-				}
-				my $exit_blast = system("tail -n +$current_line $out_dir/read_group_$same_group_count.fa | head -$accumul_read_line | blastn -task blastn -db $out_dir/current_db -query - -word_size 4 -reward 5 -penalty -4 -gapopen 8 -gapextend 6 -num_threads 1 -evalue $evalue_cor -dust no -soft_masking false -outfmt \"6 std btop\" >> $out_dir/read_SJ_group_$same_group_count.blast");
-				if ($exit_blast != 0) {
-					warn "Failed to run \"tail -n +$current_line $out_dir/read_group_$same_group_count.fa | head -$accumul_read_line | blastn -task blastn -db $out_dir/current_db -query - -word_size 4 -reward 5 -penalty -4 -gapopen 8 -gapextend 6 -num_threads 1 -evalue $evalue_cor -dust no -soft_masking false -outfmt \"6 std btop\" >> $out_dir/read_SJ_group_$same_group_count.blast\"($accumul_SJ_line). Exit code is $exit_blast";
+				if ($should_run_before_writing) {
+					# Close the temp files to flush them
+					close($blast_sj_temp_handle);
+					close($blast_read_temp_handle);
+					&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor);
+					($accumul_read_line, $accumul_SJ_line) = (0, 0);
+					# Reopen the temp files to truncate them.
+					open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
+					open($blast_read_temp_handle, ">", $blast_read_temp_path);
 				}
 			}
 
+			# cluster_read_count is actually 2*(number_of_read_sequences).
+			# This is convenient because the entry for each sequence is two lines long.
+			for my $new_read_i (0 .. ($cluster_read_count - 1)) {
+				my $new_read_line = <$blast_read_in_handle>;
+				if ($have_both_sjs_and_reads) {
+					print $blast_read_temp_handle $new_read_line;
+				}
+			}
+			# cluster_sj_count is actually 2*(number_of_sj).
+			# This is convenient because the entry for each SJ is two lines long.
+			for my $new_sj_i (0 .. ($cluster_sj_count - 1)) {
+				my $new_sj_line = <$blast_sj_in_handle>;
+				if ($have_both_sjs_and_reads) {
+					print $blast_sj_temp_handle $new_sj_line;
+				}
+			}
+
+			if ($have_both_sjs_and_reads) {
+				$accumul_read_line += $cluster_read_count;
+				$accumul_SJ_line += $cluster_sj_count;
+			}
+
+			# Make sure to run blast if this is the last loop iteration
+			if (($index_ori == $max_index) and ($accumul_read_line > 0)) {
+				# Close the temp files to flush them
+				close($blast_sj_temp_handle);
+				close($blast_read_temp_handle);
+				&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor);
+				($accumul_read_line, $accumul_SJ_line) = (0, 0);
+				# Reopen the temp files to truncate them.
+				open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
+				open($blast_read_temp_handle, ">", $blast_read_temp_path);
+			}
+		}
+		close($blast_sj_in_handle);
+		close($blast_read_in_handle);
+		close($blast_sj_temp_handle);
+		close($blast_read_temp_handle);
+
 		if (!defined $keep_tmp) {
-			unlink "$out_dir/read_group_$same_group_count.fa";
+			unlink $blast_read_in_path;
 			unlink "$out_dir/current_db.nhr";
 			unlink "$out_dir/current_db.nin";
 			unlink "$out_dir/current_db.nsq";
+			unlink $blast_sj_temp_path;
+			unlink $blast_read_temp_path;
 		}
 
 		my $output_blast;
@@ -908,7 +993,8 @@ Arguments:
 
 						my %isoform_candidates;
 						while(my ($pos, $type_ref) = each %{${$best_SJ_ref}[1]}) {
-							my @sort_SJ_add = sort {${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]} keys %{$type_ref};
+
+							my @sort_SJ_add = sort {(${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]) or (${$type_ref}{$b}[0] cmp ${$type_ref}{$a}[0])} keys %{$type_ref};
 
 							for my $i (0 .. $#sort_SJ_add) {
 								if ( ${$type_ref}{$sort_SJ_add[$i]}[1]*$confirm_prob_fold_cutoff >= ${$type_ref}{$sort_SJ_add[$i-1]}[1] ){
@@ -971,7 +1057,7 @@ Arguments:
 							
 						my %isoform_candidates;
 						while(my ($pos, $type_ref) = each %{${$best_SJ_ref}[1]}) {
-							my @sort_SJ_add = sort {${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]} keys %{$type_ref};
+							my @sort_SJ_add = sort {(${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]) or (${$type_ref}{$b}[0] cmp ${$type_ref}{$a}[0])} keys %{$type_ref};
 
 							for my $i (0 .. $#sort_SJ_add) {
 								if ( ${$type_ref}{$sort_SJ_add[$i]}[1]*$confirm_prob_fold_cutoff >= ${$type_ref}{$sort_SJ_add[$i-1]}[1] ){
@@ -1817,5 +1903,95 @@ Arguments:
 	}
 
 	sub hamming_distance{ length( $_[0] ) - ( ($_[0] ^ $_[1]) =~ tr[\0][\0] ) };
+
+	sub sort_sj_group_fa_file {
+		# Each entry in the original file consists of two lines like:
+		# >chr11:15170776:15197286:0 SJclst:0: group:3919:
+		# ACTCCGTCACCCTGCCGGGTCAGCGGCTACACCTGATGCAGGTGGACTCA
+		#
+		# First combine those two lines on a single line with the SJclst
+		# value placed at the begining of the line with a space. Then
+		# the sort command will use the SJclst value as the sort key.
+		# Then restore the original two line format.
+		my ($orig_file_path, $tmp_file_path) = @_;
+		open(my $tmp_write_handle,  ">", $tmp_file_path) or die "cannot write $tmp_file_path: $!";
+		open(my $orig_read_handle,  "<", $orig_file_path) or die "cannot read $orig_file_path: $!";
+		my $combined_line;
+		my $line_in_combo_i = 1;
+		while (my $full_line = <$orig_read_handle>) {
+			chomp $full_line;
+			if ($line_in_combo_i == 1) {
+				$line_in_combo_i = 2;
+				my @line_pieces = split(/:/, $full_line);
+				my $sj_cluster_index = $line_pieces[4];
+				$combined_line = "$sj_cluster_index " . $full_line;
+			} else {
+				$line_in_combo_i = 1;
+				$combined_line = $combined_line . ';' . $full_line . "\n";
+				print $tmp_write_handle $combined_line;
+				$combined_line = "";
+			}
+		}
+		close($orig_read_handle);
+		close($tmp_write_handle);
+
+		my $sort_command = "sort --numeric-sort --output=$orig_file_path $tmp_file_path";
+		my $exit_sort = system($sort_command);
+		if ($exit_sort != 0) {
+		  die "Failed to run $sort_command. Exit code is $exit_sort";
+		}
+
+		open(my $sort_read_handle, "<", $orig_file_path);
+		open(my $un_combine_write_handle, ">", $tmp_file_path);
+		while (my $full_line = <$sort_read_handle>) {
+			chomp $full_line;
+			my @line_separated = split(/;/, $full_line);
+			my $orig_second_line = $line_separated[1];
+			my $first_line = $line_separated[0];
+			my @space_separated = split(/ /, $first_line);
+			my $sj_cluster_index = $space_separated[0];
+			my $orig_first_line = substr($first_line, (length $sj_cluster_index) + 1);
+			$orig_first_line = $orig_first_line . "\n";
+			$orig_second_line = $orig_second_line . "\n";
+			print $un_combine_write_handle $orig_first_line;
+			print $un_combine_write_handle $orig_second_line;
+		}
+		close($sort_read_handle);
+		close($un_combine_write_handle);
+
+		move($tmp_file_path, $orig_file_path) or die "cannot mv $tmp_file_path $orig_file_path: $!";
+	}
+
+	sub run_blast_on_files {
+		my ($sj_file_path, $read_file_path, $out_dir, $same_group_count, $evalue_cor) = @_;
+		my $db_command = "makeblastdb -in $sj_file_path -dbtype nucl -out $out_dir/current_db -title current_db";
+		my $exit_db = system($db_command);
+		if ($exit_db != 0) {
+			warn "Failed to run \"$db_command\". Exit code is $exit_db";
+		}
+		my $blast_command = "blastn -task blastn -db $out_dir/current_db -query $read_file_path -word_size 4 -reward 5 -penalty -4 -gapopen 8 -gapextend 6 -num_threads 1 -evalue $evalue_cor -dust no -soft_masking false -outfmt \"6 std btop\" >> $out_dir/read_SJ_group_$same_group_count.blast";
+		my $exit_blast = system($blast_command);
+		if ($exit_blast != 0) {
+			warn "Failed to run \"$blast_command\". Exit code is $exit_blast";
+		}
+	}
+
+	sub estimate_blast_runtime {
+		# Based on runtimes recorded for test data, blast runtime is
+		# roughly linear with respect to (num_sj_lines * num_read_lines).
+		# Additionally, a small fixed amount of time is estimated for small inputs
+		# to account for flushing the input files and starting blast.
+		my ($num_read_lines, $num_sj_lines) = @_;
+		# Since num_reads is (num_read_lines / 2) and num_sjs is (num_sj_lines / 2) multiply by 0.25
+		my $amount_of_work = $num_read_lines * $num_sj_lines * 0.25;
+		# small job cutoff at 1500 * 0.002 = 3
+		if ($amount_of_work <= 1500) {
+			# 3 second estimate for small inputs
+			return 3;
+		}
+
+		# linear estimate for larger inputs
+		return $amount_of_work * 0.002;
+	}
 
 }

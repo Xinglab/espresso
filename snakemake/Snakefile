@@ -1,6 +1,6 @@
 import snakemake.utils
 
-snakemake.utils.min_version('5.10.0')
+snakemake.utils.min_version('6.5.3')
 
 configfile: 'snakemake_config.yaml'
 
@@ -98,16 +98,6 @@ def get_bam_path_from_wildcards(wildcards):
     return UNSATISFIABLE_INPUT
 
 
-def espresso_s_input_sample_names():
-    names = list()
-    # config['samples'] is an unordered dictionary. Sort to be consistent.
-    for sample_name in sorted(config['samples']):
-        sample_inputs = config['samples'][sample_name]
-        names.extend([sample_name] * len(sample_inputs))
-
-    return names
-
-
 def espresso_s_input_sams():
     sams = list()
     # config['samples'] is an unordered dictionary. Sort to be consistent.
@@ -121,72 +111,94 @@ def espresso_s_input_sams():
     return sams
 
 
-def espresso_q_input_espresso_c_files():
-    files = list()
-    i = 0
-    # config['samples'] is an unordered dictionary. Sort to be consistent.
-    for sample_name in sorted(config['samples']):
-        sample_inputs = config['samples'][sample_name]
-        for _ in range(len(sample_inputs)):
-            base_name = 'run_espresso_c_{}.done'.format(i)
-            path=os.path.join('espresso_out', 'work_dir', base_name)
-            files.append(path)
-            i += 1
+def reference_file_wildcard_constraints():
+    reference_files = config.get('reference_files')
+    if reference_files:
+        file_names = '|'.join([re.escape(file_name)
+                               for file_name in reference_files])
+        without_gz = '|'.join([re.escape(file_name[:-3])
+                               for file_name in reference_files
+                               if file_name.endswith('.gz')])
+    else:
+        no_match = '^$'  # only matches empty string
+        file_names = no_match
+        without_gz = no_match
 
-    return files
+    return {'file_names': file_names, 'without_gz': without_gz}
 
 
-rule download_reference_fasta:
+def get_url_for_download_reference_file(wildcards):
+    file_name = wildcards.file_name
+    return config['reference_files'][file_name]['url']
+
+
+rule download_reference_file:
     output:
-        fasta=os.path.join('references', config['fasta_name']),
+        ref_file=os.path.join('references', '{file_name}'),
     log:
-        out=os.path.join('references', 'dowload_reference_fasta_log.out'),
-        err=os.path.join('references', 'dowload_reference_fasta_log.err'),
+        out=os.path.join('references',
+                         'download_reference_file_{file_name}_log.out'),
+        err=os.path.join('references',
+                         'download_reference_file_{file_name}_log.err'),
+    wildcard_constraints:
+        file_name=reference_file_wildcard_constraints()['file_names']
     params:
-        fasta_url=config['fasta_url'],
+        url=get_url_for_download_reference_file,
     resources:
         mem_mb=DEFAULT_MEM_MB,
         time_hours=DEFAULT_TIME_HOURS,
     shell:
-        'curl \'{params.fasta_url}\' -o {output.fasta}.gz'
+        'curl -L \'{params.url}\''
+        ' -o {output.ref_file}'
         ' 1> {log.out}'
         ' 2> {log.err}'
-        ' &&'
-        ' gunzip {output.fasta}.gz'
-        ' 1>> {log.out}'
-        ' 2>> {log.err}'
 
-rule download_reference_gtf:
-    output:
-        gtf=os.path.join('references', config['gtf_name']),
-    log:
-        out=os.path.join('references', 'dowload_reference_gtf_log.out'),
-        err=os.path.join('references', 'dowload_reference_gtf_log.err'),
-    params:
-        gtf_url=config['gtf_url'],
-    resources:
-        mem_mb=DEFAULT_MEM_MB,
-        time_hours=DEFAULT_TIME_HOURS,
-    shell:
-        'curl \'{params.gtf_url}\' -o {output.gtf}.gz'
-        ' 1> {log.out}'
-        ' 2> {log.err}'
-        ' &&'
-        ' gunzip {output.gtf}.gz'
-        ' 1>> {log.out}'
-        ' 2>> {log.err}'
-
-rule base_call_with_guppy:
+rule unzip_reference_file:
     input:
-        fast5_dir=get_fast5_dir_path_from_wildcards,
+        gz=os.path.join('references', '{file_name}.gz'),
+    output:
+        un_gz=os.path.join('references', '{file_name}'),
+    log:
+        out=os.path.join('references',
+                         'unzip_reference_file_{file_name}_log.out'),
+        err=os.path.join('references',
+                         'unzip_reference_file_{file_name}_log.err'),
+    wildcard_constraints:
+        file_name=reference_file_wildcard_constraints()['without_gz']
+    resources:
+        mem_mb=DEFAULT_MEM_MB,
+        time_hours=DEFAULT_TIME_HOURS,
+    shell:
+        ' gunzip -c {input.gz}'
+        ' 1> {output.un_gz}'
+        ' 2> {log.err}'
+
+
+def get_base_call_with_guppy_cpu_input_dir_from_wildcards(wildcards):
+    if config.get('guppy_gpu'):
+        return UNSATISFIABLE_INPUT
+
+    return get_fast5_dir_path_from_wildcards(wildcards)
+
+
+def get_base_call_with_guppy_gpu_input_dir_from_wildcards(wildcards):
+    if not config.get('guppy_gpu'):
+        return UNSATISFIABLE_INPUT
+
+    return get_fast5_dir_path_from_wildcards(wildcards)
+
+
+rule base_call_with_guppy_cpu:
+    input:
+        fast5_dir=get_base_call_with_guppy_cpu_input_dir_from_wildcards,
     output:
         fastq_dir=directory(os.path.join('fastq_dir', '{sample}',
                                          '{sample_input_i}', 'separate')),
     log:
         out=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
-                         'base_call_with_guppy_log.out'),
+                         'base_call_with_guppy_cpu_log.out'),
         err=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
-                         'base_call_with_guppy_log.err'),
+                         'base_call_with_guppy_cpu_log.err'),
     params:
         guppy_config=get_guppy_config_from_wildcards,
         guppy_basecaller_path=os.path.join(config['guppy_bin_path'],
@@ -203,6 +215,35 @@ rule base_call_with_guppy:
         ' 1> {log.out}'
         ' 2> {log.err}'
 
+
+rule base_call_with_guppy_gpu:
+    input:
+        fast5_dir=get_base_call_with_guppy_gpu_input_dir_from_wildcards,
+    output:
+        fastq_dir=directory(os.path.join('fastq_dir', '{sample}',
+                                         '{sample_input_i}', 'separate')),
+    log:
+        out=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
+                         'base_call_with_guppy_gpu_log.out'),
+        err=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
+                         'base_call_with_guppy_gpu_log.err'),
+    params:
+        guppy_config=get_guppy_config_from_wildcards,
+        guppy_basecaller_path=os.path.join(config['guppy_bin_path'],
+                                           'guppy_basecaller'),
+    resources:
+        mem_mb=config['guppy_mem_gb'] * 1024,
+        time_hours=config['guppy_time_hr'],
+        gpus=config['guppy_gpus'],
+        gpu_name=config['guppy_gpu_name'],
+    shell:
+        '{params.guppy_basecaller_path} --input_path {input.fast5_dir}'
+        ' --save_path {output.fastq_dir}'
+        ' --config {params.guppy_config}'
+        ' --device auto'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
 rule combine_fastq_files:
     input:
         fastq_dir=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
@@ -215,11 +256,17 @@ rule combine_fastq_files:
                          'combine_fastq_files_log.out'),
         err=os.path.join('fastq_dir', '{sample}', '{sample_input_i}',
                          'combine_fastq_files_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'combine_fastq_files.py'),
     resources:
         mem_mb=DEFAULT_MEM_MB,
         time_hours=DEFAULT_TIME_HOURS,
     shell:
-        'cat {input.fastq_dir}/*.fastq > {output.fastq}'
+        '{params.conda_wrapper} python {params.script}'
+        ' --input-dir {input.fastq_dir}'
+        ' --out-path {output.fastq}'
+        ' 1> {log.out}'
         ' 2> {log.err}'
 
 rule create_bed_from_gtf:
@@ -346,14 +393,36 @@ rule sort_with_samtools:
         ' 1> {log.out}'
         ' 2> {log.err}'
 
+localrules: write_espresso_s_input_file
+rule write_espresso_s_input_file:
+    output:
+        s_input=os.path.join('espresso_out', 'run_espresso_s_input.txt'),
+    run:
+        import os.path
+        sams = list()
+        names = list()
+        # config['samples'] is an unordered dictionary. Sort to be consistent.
+        for sample_name in sorted(config['samples']):
+            sample_inputs = config['samples'][sample_name]
+            names.extend([sample_name] * len(sample_inputs))
+            for i in range(len(sample_inputs)):
+                sam = os.path.join('alignment', sample_name, str(i),
+                                   'aligned.sorted.sam')
+                sams.append(sam)
+
+        with open(output[0], 'wt') as handle:
+            handle.write('{}\n'.format(','.join(sams)))
+            handle.write('{}\n'.format(','.join(names)))
+
 rule run_espresso_s:
     input:
+        s_input=os.path.join('espresso_out', 'run_espresso_s_input.txt'),
         fasta=os.path.join('references', config['fasta_name']),
         gtf=os.path.join('references', config['gtf_name']),
         sams=espresso_s_input_sams(),
     output:
         samples_tsv=os.path.join('espresso_out', 'samples.tsv'),
-        updated_tsv=os.path.join('espresso_out', 'work_dir',
+        updated_tsv=os.path.join('espresso_out', 's_work_dir',
                                  'samples.tsv.updated'),
     log:
         out=os.path.join('espresso_out', 'run_espresso_s_log.out'),
@@ -362,8 +431,6 @@ rule run_espresso_s:
         conda_wrapper=config['conda_wrapper'],
         script=os.path.join('scripts', 'espresso_s_wrapper.py'),
         espresso_s_path=os.path.join(config['espresso_path'], 'ESPRESSO_S.pl'),
-        comma_sample_names=','.join(espresso_s_input_sample_names()),
-        comma_sams=lambda wildcards, input: ','.join(input.sams),
         out_dir=lambda wildcards, output: os.path.dirname(output.updated_tsv),
     threads: config['espresso_s_threads']
     resources:
@@ -371,8 +438,7 @@ rule run_espresso_s:
         time_hours=config['espresso_s_time_hr'],
     shell:
         '{params.conda_wrapper} python {params.script}'
-        ' --sams {params.comma_sams}'
-        ' --sample-names {params.comma_sample_names}'
+        ' --s-input {input.s_input}'
         ' --out-tsv {output.samples_tsv}'
         ' --command'
         ' perl {params.espresso_s_path}'
@@ -383,24 +449,62 @@ rule run_espresso_s:
         ' 1> {log.out}'
         ' 2> {log.err}'
 
+checkpoint split_s_for_c:
+    input:
+        fasta=os.path.join('references', config['fasta_name']),
+        samples_tsv=os.path.join('espresso_out', 's_work_dir',
+                                 'samples.tsv.updated'),
+    output:
+        samples_tsv=os.path.join('espresso_out', 'c_work_dir',
+                                 'samples.tsv.updated'),
+    log:
+        out=os.path.join('espresso_out', 'split_s_for_c_log.out'),
+        err=os.path.join('espresso_out', 'split_s_for_c_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'split_espresso_s_output_for_c.py'),
+        orig_work_dir=os.path.join('espresso_out', 's_work_dir'),
+        new_base_dir=os.path.join('espresso_out', 'c_work_dir'),
+        target_reads_per_c=config['target_reads_per_espresso_c_job'],
+        sort_memory_buffer_size='2G',
+    resources:
+        mem_mb=config['split_s_for_c_mem_gb'] * 1024,
+        time_hours=config['split_s_for_c_time_hr'],
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --orig-work-dir {params.orig_work_dir}'
+        ' --new-base-dir {params.new_base_dir}'
+        ' --target-reads-per-c {params.target_reads_per_c}'
+        ' --genome-fasta {input.fasta}'
+        ' --sort-memory-buffer-size {params.sort_memory_buffer_size}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
+
+def run_espresso_c_out_dir_param(wildcards, input):
+    work_dir = os.path.dirname(input.updated_tsv)
+    return os.path.join(work_dir, wildcards.updated_tsv_i)
+
+
 rule run_espresso_c:
     input:
-        updated_tsv=os.path.join('espresso_out', 'work_dir',
+        updated_tsv=os.path.join('espresso_out', 'c_work_dir',
                                  'samples.tsv.updated'),
         fasta=os.path.join('references', config['fasta_name']),
     output:
-        done=touch(os.path.join('espresso_out', 'work_dir',
+        done=touch(os.path.join('espresso_out', 'c_work_dir',
                                 'run_espresso_c_{updated_tsv_i}.done')),
     log:
-        out=os.path.join('espresso_out', 'work_dir',
+        out=os.path.join('espresso_out', 'c_work_dir',
                          'run_espresso_c_{updated_tsv_i}_log.out'),
-        err=os.path.join('espresso_out', 'work_dir',
+        err=os.path.join('espresso_out', 'c_work_dir',
                          'run_espresso_c_{updated_tsv_i}_log.err'),
     params:
         conda_wrapper=config['conda_wrapper'],
         espresso_c_path=os.path.join(config['espresso_path'], 'ESPRESSO_C.pl'),
         keep_temp='-K' if config['keep_espresso_c_temp'] else '',
-        out_dir=lambda wildcards, input: os.path.dirname(input.updated_tsv),
+        out_dir=run_espresso_c_out_dir_param,
+        sub_dir_i='0',
     threads: config['espresso_c_threads']
     resources:
         mem_mb=config['espresso_c_mem_gb'] * 1024,
@@ -410,22 +514,62 @@ rule run_espresso_c:
         ' perl {params.espresso_c_path}'
         ' -I {params.out_dir}'
         ' -F {input.fasta}'
-        ' -X {wildcards.updated_tsv_i}'
+        ' -X {params.sub_dir_i}'
         ' -T {threads}'
         ' {params.keep_temp}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
 
+def combine_c_for_q_input(wildcards):
+    inputs = dict()
+    split_checkpoint = checkpoints.split_s_for_c.get()
+    samples_tsv = split_checkpoint.output.samples_tsv
+    with open(samples_tsv, 'rt') as handle:
+        for line in handle:
+            columns = line.strip().split('\t')
+            c_index = columns[2]
+            inputs[c_index] = os.path.join(
+                'espresso_out', 'c_work_dir',
+                'run_espresso_c_{}.done'.format(c_index))
+
+    return inputs
+
+
+rule combine_c_for_q:
+    input:
+        unpack(combine_c_for_q_input),
+    output:
+        updated_tsv=os.path.join('espresso_out', 'q_work_dir',
+                                 'samples.tsv.updated'),
+    log:
+        out=os.path.join('espresso_out', 'combine_c_for_q_log.out'),
+        err=os.path.join('espresso_out', 'combine_c_for_q_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'combine_espresso_c_output_for_q.py'),
+        c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
+        q_work_dir=os.path.join('espresso_out', 'q_work_dir'),
+    resources:
+        mem_mb=config['combine_c_for_q_mem_gb'] * 1024,
+        time_hours=config['combine_c_for_q_time_hr'],
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --c-base-work-dir {params.c_work_dir}'
+        ' --new-base-dir {params.q_work_dir}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
+
 def run_espresso_q_output():
     outputs = dict()
-    outputs['abundance_esp'] = os.path.join('espresso_out', 'work_dir',
+    outputs['abundance_esp'] = os.path.join('espresso_out', 'q_work_dir',
                                             'samples_N2_R0_abundance.esp')
-    outputs['updated_gtf'] = os.path.join('espresso_out', 'work_dir',
+    outputs['updated_gtf'] = os.path.join('espresso_out', 'q_work_dir',
                                           'samples_N2_R0_updated.gtf')
     if config['output_compatible_isoforms']:
         outputs['isoform_tsv'] = os.path.join(
-            'espresso_out', 'work_dir', 'samples_N2_R0_compatible_isoform.tsv')
+            'espresso_out', 'q_work_dir', 'samples_N2_R0_compatible_isoform.tsv')
 
     return outputs
 
@@ -439,10 +583,9 @@ def maybe_compat_iso_param(wildcards, output):
 
 rule run_espresso_q:
     input:
-        updated_tsv=os.path.join('espresso_out', 'work_dir',
+        updated_tsv=os.path.join('espresso_out', 'q_work_dir',
                                  'samples.tsv.updated'),
         gtf=os.path.join('references', config['gtf_name']),
-        espresso_c_files=espresso_q_input_espresso_c_files(),
     output:
         **run_espresso_q_output()
     log:
@@ -452,13 +595,15 @@ rule run_espresso_q:
         conda_wrapper=config['conda_wrapper'],
         espresso_q_path=os.path.join(config['espresso_path'], 'ESPRESSO_Q.pl'),
         maybe_compat_iso=maybe_compat_iso_param,
+    threads: config['espresso_q_threads']
     resources:
         mem_mb=config['espresso_q_mem_gb'] * 1024,
-        time_hours=DEFAULT_TIME_HOURS,
+        time_hours=config['espresso_q_time_hr'],
     shell:
         '{params.conda_wrapper} perl {params.espresso_q_path}'
         ' -A {input.gtf}'
         ' -L {input.updated_tsv}'
+        ' -T {threads}'
         ' {params.maybe_compat_iso}'
         ' 1> {log.out}'
         ' 2> {log.err}'
@@ -507,9 +652,9 @@ def visualize_output_dir(wildcards, output):
 rule run_visualize:
     input:
         fasta=os.path.join('references', config['fasta_name']),
-        updated_gtf=os.path.join('espresso_out', 'work_dir',
+        updated_gtf=os.path.join('espresso_out', 'q_work_dir',
                                  'samples_N2_R0_updated.gtf'),
-        abundance_esp=os.path.join('espresso_out', 'work_dir',
+        abundance_esp=os.path.join('espresso_out', 'q_work_dir',
                                    'samples_N2_R0_abundance.esp'),
     output:
         **run_visualize_output()

@@ -46,13 +46,20 @@ Run the workflow with: [./run](run)
   - `{job_name}_time_hr: {num_hours}`
 * If any samples have fast5 input then set:
   - `guppy_bin_path: /path/to/guppy/bin/`
+  - Also: `guppy_gpu: true` if using a GPU version of guppy
 * Specify the .gtf and .fasta to use:
-  + Either provide a url to download the .gz file:
-    - `gtf_url: 'protocol://url/for/some_file.gtf.gz'`
-    - `gtf_name: 'some_file.gtf'`
-    - `fasta_url: 'protocol://url/for/some_file.fasta.gz'`
-    - `fasta_name: 'some_file.fasta'`
-  + Or just provide the `gtf_name:` and `fasta_name:` and put the files in `snakemake/references/`.
+  + Provide the file names as `gtf_name:` and `fasta_name:`
+  + Either place the files in `snakemake/references/`
+  + Or provide a url under `reference_files:` to download the (potentially gzipped) files:
+```
+gtf_name: 'some_filename.gtf'
+fasta_name: other_filename.fasta'
+reference_files:
+  some_filename.gtf.gz:
+    url: 'protocol://url/for/some_filename.gtf.gz'
+  other_filename.fasta.gz:
+    url: 'protocol://url/for/other_filename.fasta.gz'
+```
 * Add a config entry for each input under `samples:`
 * Samples with a fast5 input require:
   + `guppy_config: 'the_guppy.cfg'` (example: `rna_r9.4.1_70bps_fast.cfg`)
@@ -78,6 +85,9 @@ samples:
   + `keep_espresso_c_temp`: Keep temporary files from `espresso_c`.
   + `output_compatible_isoforms`: Produce the `samples_N2_R0_compatible_isoform.tsv` output file.
   + `enable_visualization`: Generate files for visualization. Requires setting other config values under "Visualization options"
+  + `target_reads_per_espresso_c_job`: How many reads should be run in a single `ESPRESSO_C` job
+  + `guppy_gpu_name`: Used to request the correct GPU if submitting jobs to a scheduler
+  + `guppy_gpus`: How many GPUs to request per guppy job
 
 The configuration used for running jobs in a cluster environment can be set by editing [snakemake_profile](snakemake_profile):
 
@@ -121,7 +131,7 @@ Run:
 Output:
 
 
-The output file `espresso_out/work_dir/samples_N2_R0_abundance.esp` should be similar to [../test_data/expected_cd44_abundance.esp](../test_data/expected_cd44_abundance.esp).
+The output file `espresso_out/q_work_dir/samples_N2_R0_abundance.esp` should be similar to [../test_data/expected_cd44_abundance.esp](../test_data/expected_cd44_abundance.esp).
 
 
 This is a visualization created from the results:
@@ -132,7 +142,7 @@ The visualization can be created manually by following the instructions in [../R
 
 ## Output
 
-* `espresso_out/work_dir/`
+* `espresso_out/q_work_dir/`
   + `samples_N2_R0_abundance.esp`
   + `samples_N2_R0_updated.gtf`
   + `samples_N2_R0_compatible_isoform.tsv`
