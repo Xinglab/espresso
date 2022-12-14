@@ -1,17 +1,23 @@
 import argparse
 import datetime
 import os.path
-import subprocess
 import sys
 import time
 
 import cluster_commands
+import try_command
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'job_id', help='the cluster id of the job to check the status of')
+    parser.add_argument(
+        '--retry-status-interval-seconds',
+        default='',
+        help='a "," separated list of integers representing'
+        ' the number of seconds to wait after sequential failed'
+        ' job status commands before retrying')
     parser.add_argument(
         '--resource-usage-dir',
         help='a directory for storing the file paths where the resource usage'
@@ -24,23 +30,16 @@ def parse_args():
         ' seconds since the last log')
     args = parser.parse_args()
 
-    return args
+    retry_status_interval_seconds = list()
+    for int_str in args.retry_status_interval_seconds.split(','):
+        retry_status_interval_seconds.append(int(int_str))
 
-
-def run_command(command):
-    completed_process = subprocess.run(command,
-                                       check=False,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE)
-    decoded_stdout = completed_process.stdout.decode()
-    decoded_stderr = completed_process.stderr.decode()
-    if completed_process.returncode != 0:
-        print('stdout:\n{}\n\nstderr:\n{}'.format(decoded_stdout,
-                                                  decoded_stderr),
-              file=sys.stderr)
-        sys.exit(1)
-
-    return decoded_stdout
+    return {
+        'job_id': args.job_id,
+        'retry_status_interval_seconds': retry_status_interval_seconds,
+        'resource_usage_dir': args.resource_usage_dir,
+        'resource_usage_min_interval': args.resource_usage_min_interval,
+    }
 
 
 def extract_job_info(stdout, job_id):
@@ -103,16 +102,24 @@ def update_resource_log_with_file(resource_usage, min_interval_seconds,
         f_handle.write('{}\n'.format(resource_usage))
 
 
+def run_status_command(command, retry_status_interval_seconds):
+    stdout, error = try_command.try_command(command, retry_status_interval_seconds)
+    if error:
+        sys.exit(error)
+
+    return stdout
+
+
 def main():
     args = parse_args()
-    job_id = args.job_id
+    job_id = args['job_id']
     command = cluster_commands.status_command(job_id)
-    stdout = run_command(command)
+    stdout = run_status_command(command, args['retry_status_interval_seconds'])
     job_info = extract_job_info(stdout, job_id)
     status = job_info['status']
     update_resource_log(status, job_info['resource_usage'],
-                        args.resource_usage_dir,
-                        args.resource_usage_min_interval, job_id)
+                        args['resource_usage_dir'],
+                        args['resource_usage_min_interval'], job_id)
     print(status)
 
 

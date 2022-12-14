@@ -1,22 +1,31 @@
 # Resource allocation
-guppy_threads: 20
+guppy_gpu_name: 'a100'
+guppy_gpus: 1
 guppy_mem_gb: 48
+guppy_threads: 20
 guppy_time_hr: 48
-minimap2_threads: 10
-minimap2_mem_gb: 48
-minimap2_time_hr: 48
-espresso_s_threads: 5
-espresso_s_mem_gb: 64
-espresso_s_time_hr: 48
-espresso_c_threads: 5
+combine_c_for_q_mem_gb: 8
+combine_c_for_q_time_hr: 12
 espresso_c_mem_gb: 64
+espresso_c_threads: 5
 espresso_c_time_hr: 48
 espresso_q_mem_gb: 32
+espresso_q_threads: 5
+espresso_q_time_hr: 48
+espresso_s_mem_gb: 64
+espresso_s_threads: 5
+espresso_s_time_hr: 48
+minimap2_mem_gb: 48
+minimap2_threads: 10
+minimap2_time_hr: 48
+split_s_for_c_mem_gb: 32
+split_s_for_c_time_hr: 12
 visualize_mem_gb: 40
 # Command options
 use_annotated_junctions_with_minimap2: true
 keep_espresso_c_temp: false
 output_compatible_isoforms: false
+target_reads_per_espresso_c_job: 5000000
 # Visualization options
 enable_visualization: false
 vis_normalize_counts: false
@@ -24,15 +33,19 @@ vis_target_gene: ''
 vis_minimum_count: 1
 vis_descriptive_name: 'ESPRESSO'
 # Reference files
-gtf_url: 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh37_mapping/gencode.v34lift37.annotation.gtf.gz'
 gtf_name: 'gencode.v34lift37.annotation.gtf'
-fasta_url: 'http://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz'
 fasta_name: 'ucsc.hg19.fasta'
+reference_files:
+  gencode.v34lift37.annotation.gtf.gz:
+    url: 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh37_mapping/gencode.v34lift37.annotation.gtf.gz'
+  ucsc.hg19.fasta.gz:
+    url: 'http://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz'
 # Input samples
 samples:
   sample_1_name:
     - fastq: '/path/to/file.fastq'
   sample_2_name:
     - fastq: '/path/to/file.fastq'
-# Executable paths
+# Additional configuration
 guppy_bin_path: '/path/to/guppy/bin/'
+guppy_gpu: false

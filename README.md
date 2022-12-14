@@ -28,6 +28,8 @@ ESPRESSO requires the following to be installed and available on $PATH:
 
 * [Perl](https://www.perl.org/) >= 5.8 built with threading enabled
   + Check for thread support with `perl -e 'use threads; print("ok\n")'`
+  + Requires Storable >= 3.00: https://perldoc.perl.org/Storable#huge-objects
+    - Check with `perl -e 'use Storable; print("$Storable::VERSION\n")'`
 * [hmmer](http://www.hmmer.org/) >= 3.3.1
 * [BLAST](https://blast.ncbi.nlm.nih.gov/Blast.cgi) >= 2.8.1
 * [samtools](http://www.htslib.org/) >= 1.6
@@ -54,7 +56,7 @@ Please ensure that enough memory is available for the input data and number of t
 
 * `ESPRESSO_S`: `num_threads * (4 + read_count_of_largest_input/1,000,000)`
 * `ESPRESSO_C`: `num_threads * (4 + read_count/2,500,000)`
-* `ESPRESSO_Q`: `2 + total_read_count/4,000,000`
+* `ESPRESSO_Q`: `num_threads * (2 + total_read_count/4,000,000)`
 
 ### Snakemake
 
@@ -249,6 +251,8 @@ Arguments:
           output directory (default: directory of -L)
     -V, --tsv_compt
           output tsv for compatible isoform(s) of each read (optional)
+    -T --num_thread
+          how many threads to use (default: 5)
 
     -H, --help
           show this help information

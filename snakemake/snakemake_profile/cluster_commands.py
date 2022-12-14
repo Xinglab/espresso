@@ -3,7 +3,7 @@ import os.path
 
 
 def submit_command(log_out, log_err, threads, time_hours, mem_mb,
-                   mem_mb_per_thread, jobscript):
+                   mem_mb_per_thread, gpus, gpu_name, jobscript):
     # sbatch requires that the directories for the log files already exist
     for log_path in [log_out, log_err]:
         log_dir = os.path.dirname(log_path)
@@ -23,6 +23,16 @@ def submit_command(log_out, log_err, threads, time_hours, mem_mb,
 
     if mem_mb:
         command.append('--mem={}M'.format(mem_mb))
+
+    if gpus:
+        gres_argument_base = '--gres=gpu'
+        if gpu_name:
+            gres_argument = '{}:{}:{}'.format(gres_argument_base, gpu_name,
+                                              gpus)
+        else:
+            gres_argument = '{}:{}'.format(gres_argument_base, gpus)
+
+        command.extend(['-p', 'gpuq', gres_argument])
 
     command.append(jobscript)
     return command
@@ -126,7 +136,7 @@ def try_extract_job_info_from_status_output(stdout, job_id):
                       ' max_disk_read: {max_disk_read},'
                       ' max_disk_write: {max_disk_write},'
                       ' max_rss: {max_rss},'
-                      ' max_vmem: {max_vmem}'
+                      ' max_vmem: {max_vmem},'
                       ' start_time: {start_time},'
                       ' state: {state},'
                       ' submit_time: {submit_time},'
