@@ -34,7 +34,7 @@ def status_command(job_id):
     return ['qstat', '-j', job_id, '-xml']
 
 
-def try_extract_job_info_from_status_output(stdout, job_id):
+def try_extract_job_info_from_status_output(stdout, job_id, max_job_days):
     info = {'status': None, 'resource_usage': None}
     soup = bs4.BeautifulSoup(stdout, 'html.parser')
 

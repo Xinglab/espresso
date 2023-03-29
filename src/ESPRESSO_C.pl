@@ -110,23 +110,15 @@ Arguments:
 		push @die_reason, " Please designate at least 2 threads\n";
 	}
 
-	my @blast_versions = qx(blastn -version);
-	my $tag_blast = 0;
-	if (@blast_versions > 0) {
-		my @line = split /\s+/, $blast_versions[0];
-		my @version_tiny = split /[.]/, $line[1];
-		$tag_blast = 1 if $version_tiny[0] >= 2 and ($version_tiny[1] > 8 or ($version_tiny[1] == 8 and $version_tiny[2] >= 1));
+	my $blast_version_error = ESPRESSO_Version::check_blast_version();
+	if ($blast_version_error ne '') {
+		push @die_reason, "$blast_version_error\n";
 	}
-	push @die_reason, "Please make sure BLAST 2.8.1 or higher version is installed and included in \$PATH!" if $tag_blast == 0;
 
-	my @nhmmer_versions = qx(nhmmer -h | head -2);
-	my $tag_nhmmer = 0;
-	if (@nhmmer_versions == 2) {
-		my @line = split /\s+/, $nhmmer_versions[1];
-		my @version_tiny = split /[.]/, $line[2];
-		$tag_nhmmer = 1 if $version_tiny[0] == 3 and $version_tiny[1] == 3 and $version_tiny[2] == 1;
+	my $nhmmer_version_error = ESPRESSO_Version::check_nhmmer_version();
+	if ($nhmmer_version_error ne '') {
+		push @die_reason, "$nhmmer_version_error\n";
 	}
-	push @die_reason, "Please make sure nhmmer 3.3.1 is installed and included in \$PATH!" if $nhmmer_versions[1]=='HMMER' and $tag_nhmmer == 0;
 
 	if ( @warn_reason >= 1 ) {
 		print @warn_reason;
@@ -278,16 +270,13 @@ Arguments:
 	my @split_list_sort = sort {$a cmp $b} keys %{$split_list_first_read};
 	my @ths;
 	for my $file (@split_list_sort){
-		my $th = threads -> new({'context' => 'void'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths)]);
+		my $th = threads -> new({'context' => 'scalar'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths)]);
 		my $th_id = $th->tid();
 		print " Worker $th_id begins to scan $file.\n";
 		unshift @ths, $th;
 	}
-	for (@ths) {
-		my $th_id = $_->tid();
-		$_ -> join();
-		print " Worker $th_id finished reporting.\n";
-	}
+
+	&wait_for_threads_to_complete_work(\@ths);
 	@ths = ();
 
 	while (my ($chr, $len) = each %chr_seq_len) {
@@ -479,6 +468,8 @@ Arguments:
 			unlink "$in/$target_ID/$file";
 		}
 
+		# indicate that the thread completed
+		return 1;
 	}
 
 	sub summary_final_output {
@@ -1992,6 +1983,69 @@ Arguments:
 
 		# linear estimate for larger inputs
 		return $amount_of_work * 0.002;
+	}
+
+	sub wait_for_threads_to_complete_work {
+		my $threads_ref = $_[0];
+		my $num_threads = scalar(@{$threads_ref});
+		my @running_threads = 0 .. ($num_threads - 1);
+		my @still_running_threads = ();
+		my $first_check = 1;
+		my $had_error = 0;
+		while (@running_threads) {
+			if ($first_check) {
+				$first_check = 0;
+			} else {
+				# Give the threads a chance to work
+				my $sleep_seconds = 5;
+				sleep $sleep_seconds;
+			}
+			for my $thread_i (@running_threads) {
+				my $thread_is_joinable = $threads_ref->[$thread_i]->is_joinable();
+				if ($thread_is_joinable) {
+					my $result = $threads_ref->[$thread_i]->join();
+					if ($result == 1) {
+						my $th_id = $threads_ref->[$thread_i]->tid();
+						print "Worker $th_id finished reporting.\n";
+					} else {
+						$had_error = 1;
+					}
+				} else {
+					push @still_running_threads, $thread_i;
+				}
+			}
+
+			@running_threads = @still_running_threads;
+			@still_running_threads = ();
+			if ($had_error) {
+				last;
+			}
+		}
+
+		if (!$had_error) {
+			return;
+		}
+
+		for my $thread_i (@running_threads) {
+			if (!$threads_ref->[$thread_i]->is_joinable()) {
+				my $th_id = $threads_ref->[$thread_i]->tid();
+				print "Terminating worker $th_id.\n";
+				$threads_ref->[$thread_i]->kill('SIGTERM');
+			}
+		}
+		# Give the threads a chance to exit
+		my $sleep_seconds = 1;
+		sleep $sleep_seconds;
+
+		for my $thread_i (@running_threads) {
+			if ($threads_ref->[$thread_i]->is_joinable()) {
+				$threads_ref->[$thread_i]->join();
+			} else {
+				my $th_id = $threads_ref->[$thread_i]->tid();
+				print "Worker $th_id not responding.\n";
+			}
+		}
+		die "Exiting due to error in worker thread\n";
 	}
 
 }

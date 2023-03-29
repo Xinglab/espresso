@@ -1,4 +1,6 @@
 import argparse
+import os
+import os.path
 import subprocess
 
 
@@ -7,11 +9,17 @@ def parse_args():
         description=('Wrapper to write the tsv needed to run ESPRESSO_S'))
     parser.add_argument(
         '--s-input',
+        required=True,
         help=('a txt file where 1st line is comma separated paths of sam files'
               ' for each input, and 2nd line is comma separated sample names'
               ' for each input'))
     parser.add_argument('--out-tsv',
+                        required=True,
                         help='the path of the sample tsv to write')
+    parser.add_argument(
+        '--tmp-dir',
+        required=True,
+        help='the path of the directory to use for temporary files')
     parser.add_argument('--command',
                         nargs=argparse.REMAINDER,
                         help='the espresso_s command to add the sample tsv to')
@@ -41,6 +49,8 @@ def run_espresso_s(args):
     sams, names = read_s_input(args.s_input)
     write_sample_tsv(sams, names, args.out_tsv)
     espresso_command = args.command + ['-L', args.out_tsv]
+    abs_tmp_path = os.path.abspath(args.tmp_dir)
+    os.environ['TMPDIR'] = abs_tmp_path
     subprocess.run(espresso_command, check=True)
 
 

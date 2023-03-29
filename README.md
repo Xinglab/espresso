@@ -20,6 +20,7 @@ ESPRESSO (Error Statistics PRomoted Evaluator of Splice Site Options) is a novel
 * [Visualization](#visualization)
   + [Visualization Arguments](#visualization-arguments)
   + [IGV](#igv)
+* [Test](#test)
 * [References](#references)
 
 ## Dependencies
@@ -353,6 +354,10 @@ optional arguments:
   + Add horizontal lines between panels.
   + Edit the text on the left axis.
   + Add a text title at the bottom.
+
+## Test
+
+* Run the automated tests in [tests/](tests/) with [./run_tests](./run_tests)
 
 ## References
 

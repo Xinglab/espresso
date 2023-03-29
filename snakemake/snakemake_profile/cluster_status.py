@@ -28,6 +28,13 @@ def parse_args():
         default=120,
         help='only log the resource usage if it has been at least this many'
         ' seconds since the last log')
+    parser.add_argument(
+        '--max-job-days',
+        type=int,
+        default=60,
+        help=('cluster job IDs can start being reused after reaching the'
+              ' max id. If a job is older than --max-job-days assume that the'
+              ' time is actually from an old job ID'))
     args = parser.parse_args()
 
     retry_status_interval_seconds = list()
@@ -39,12 +46,13 @@ def parse_args():
         'retry_status_interval_seconds': retry_status_interval_seconds,
         'resource_usage_dir': args.resource_usage_dir,
         'resource_usage_min_interval': args.resource_usage_min_interval,
+        'max_job_days': args.max_job_days,
     }
 
 
-def extract_job_info(stdout, job_id):
+def extract_job_info(stdout, job_id, max_job_days):
     info, error = cluster_commands.try_extract_job_info_from_status_output(
-        stdout, job_id)
+        stdout, job_id, max_job_days)
     if error:
         print('error: {}\n{}'.format(error, stdout), file=sys.stderr)
         sys.exit(1)
@@ -103,7 +111,8 @@ def update_resource_log_with_file(resource_usage, min_interval_seconds,
 
 
 def run_status_command(command, retry_status_interval_seconds):
-    stdout, error = try_command.try_command(command, retry_status_interval_seconds)
+    stdout, error = try_command.try_command(command,
+                                            retry_status_interval_seconds)
     if error:
         sys.exit(error)
 
@@ -115,7 +124,7 @@ def main():
     job_id = args['job_id']
     command = cluster_commands.status_command(job_id)
     stdout = run_status_command(command, args['retry_status_interval_seconds'])
-    job_info = extract_job_info(stdout, job_id)
+    job_info = extract_job_info(stdout, job_id, args['max_job_days'])
     status = job_info['status']
     update_resource_log(status, job_info['resource_usage'],
                         args['resource_usage_dir'],

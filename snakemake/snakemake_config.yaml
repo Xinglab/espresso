@@ -9,7 +9,7 @@ combine_c_for_q_time_hr: 12
 espresso_c_mem_gb: 64
 espresso_c_threads: 5
 espresso_c_time_hr: 48
-espresso_q_mem_gb: 32
+espresso_q_mem_gb: 64
 espresso_q_threads: 5
 espresso_q_time_hr: 48
 espresso_s_mem_gb: 64
@@ -25,7 +25,7 @@ visualize_mem_gb: 40
 use_annotated_junctions_with_minimap2: true
 keep_espresso_c_temp: false
 output_compatible_isoforms: false
-target_reads_per_espresso_c_job: 5000000
+target_reads_per_espresso_c_job: 1000000
 # Visualization options
 enable_visualization: false
 vis_normalize_counts: false

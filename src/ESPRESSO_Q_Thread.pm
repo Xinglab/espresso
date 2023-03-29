@@ -4,7 +4,7 @@ use strict;
 
 use Storable qw(retrieve);
 
-if ((scalar @ARGV) == 2) {
+if ($0 =~ /ESPRESSO_Q_Thread/) {
 	# Run as a script
 	my $stored_shared_arguments = $ARGV[0];
 	my $stored_chr_arguments = $ARGV[1];
@@ -464,10 +464,14 @@ sub process_results_for_chr {
 			}
 		} else {
 
-
-		
 		if (exists $SJ_chain_cat{'nnc'}) {
-			my @chain_length_sort = sort {$SJ_chain_cat{'nnc'}{$a}[0] <=> $SJ_chain_cat{'nnc'}{$b}[0]} keys %{$SJ_chain_cat{'nnc'}};
+			# Sort on chain length, but break ties with compare_SJ_chains_as_numeric_tuples.
+			# The tie break ensures consistent novel isoform IDs.
+			my @chain_length_sort = sort {
+				my $len_a = $SJ_chain_cat{'nnc'}{$a}[0];
+				my $len_b = $SJ_chain_cat{'nnc'}{$b}[0];
+				($len_a <=> $len_b) or &compare_SJ_chains_as_numeric_tuples($a, $b)
+			} keys %{$SJ_chain_cat{'nnc'}};
 			for my $chain(@chain_length_sort) {
 				my $validation_result = &valid_nc($default_handle, $chain, $chr_SJ_reads_ref, $SJ_chain_read{$chain}[-1], \%read_info, \@all_SJ_group_sort, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $read_num_cutoff, $read_ratio_cutoff);
 				if (${$validation_result}[0] >= 1) { #chr_anno_SJ_ref
@@ -494,7 +498,13 @@ sub process_results_for_chr {
 			}
 		}
 		if (exists $SJ_chain_cat{'nic'}) {
-			my @chain_length_sort = sort {$SJ_chain_cat{'nic'}{$a}[0] <=> $SJ_chain_cat{'nic'}{$b}[0]} keys %{$SJ_chain_cat{'nic'}};
+			# Sort on chain length, but break ties with compare_SJ_chains_as_numeric_tuples.
+			# The tie break ensures consistent novel isoform IDs.
+			my @chain_length_sort = sort {
+				my $len_a = $SJ_chain_cat{'nic'}{$a}[0];
+				my $len_b = $SJ_chain_cat{'nic'}{$b}[0];
+				($len_a <=> $len_b) or &compare_SJ_chains_as_numeric_tuples($a, $b)
+			} keys %{$SJ_chain_cat{'nic'}};
 			for my $chain(@chain_length_sort) {
 				my $validation_result = &valid_nc($default_handle, $chain, $chr_SJ_reads_ref, $SJ_chain_read{$chain}[-1], \%read_info, \@all_SJ_group_sort, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $read_num_cutoff, $read_ratio_cutoff);
 				if (${$validation_result}[0] >= 1) {
@@ -533,7 +543,13 @@ sub process_results_for_chr {
 		}
 
 		if (exists $SJ_chain_cat{'ism'}) {
-			my @chain_length_sort = sort {$SJ_chain_cat{'ism'}{$a}[0] <=> $SJ_chain_cat{'ism'}{$b}[0]} keys %{$SJ_chain_cat{'ism'}};
+			# Sort on chain length, but break ties with compare_SJ_chains_as_numeric_tuples.
+			# The tie break ensures consistent novel isoform IDs.
+			my @chain_length_sort = sort {
+				my $len_a = $SJ_chain_cat{'ism'}{$a}[0];
+				my $len_b = $SJ_chain_cat{'ism'}{$b}[0];
+				($len_a <=> $len_b) or &compare_SJ_chains_as_numeric_tuples($a, $b)
+			} keys %{$SJ_chain_cat{'ism'}};
 			my (@possible_nc_ism, %chain_w_compatible_annotated_fsm);
 			for my $chain(@chain_length_sort) {
 				my (@isoforms_fsm_valid);
@@ -1107,7 +1123,8 @@ sub process_results_for_chr {
 			}
 
 			for my $isoform ( @{${$chain_info_ref}[-1]} ){
-				my $abu_output = "$isoform\t$isoform_info_ref->{$isoform}[-1]\t$isoform_info_ref->{$isoform}[0]";
+				my $gene_ID = $isoform_info_ref->{$isoform}[0];
+				my $abu_output = "$isoform\t$isoform_info_ref->{$isoform}[-1]\t$gene_ID";
 				my $tag = 0;
 				for my $sample (@{$samples_sort_ref}){
 					if ($total_perfect_match{$sample} > 0){
@@ -1128,7 +1145,7 @@ sub process_results_for_chr {
 				}
 				if ($tag == 1){
 					print $abu_handle $abu_output."\n";
-					&gtf_output($gtf_handle, $chr, $isoform, [$multi_exon_isoform_end_ref->{$isoform}{'0'},$multi_exon_isoform_end_ref->{$isoform}{'1'}], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
+					&gtf_output($gtf_handle, $chr, $isoform, $gene_ID, [$multi_exon_isoform_end_ref->{$isoform}{'0'},$multi_exon_isoform_end_ref->{$isoform}{'1'}], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
 				}
 				
 			}
@@ -1189,9 +1206,12 @@ sub process_results_for_chr {
 
 				printf $abu_handle "\t%.2f", $read_count_isoform{$nc_SJ_chain}{$_}[2] for @{$samples_sort_ref};
 				print $abu_handle "\n";
-				&gtf_output($gtf_handle, $chr, $isoform_ID, [$SJ_chain_read{$nc_SJ_chain}[1],$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
+				# gtf_output expects a 0-based start coordinate
+				my $zero_based_start = $SJ_chain_read{$nc_SJ_chain}[1] - 1;
+				&gtf_output($gtf_handle, $chr, $isoform_ID, $possible_genes_ID, [$zero_based_start,$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
 			} else {
 				my $isoform_ID = "ESPRESSO:$chr:$n:$nc_SJ_chain_ID";
+				my $possible_genes_ID = "";
 				print $abu_handle "$isoform_ID\tNA";
 				my %possible_genes;
 				for my $SJ(@SJs) {
@@ -1204,14 +1224,19 @@ sub process_results_for_chr {
 				my @possible_genes_sort = sort {$possible_genes{$b} <=> $possible_genes{$a}} keys %possible_genes;
 				if (@possible_genes_sort > 0) {
 					print $abu_handle "\t$possible_genes_sort[0]";
+					$possible_genes_ID = $possible_genes_sort[0];
 					print $abu_handle ",$possible_genes_sort[$_]" for 1 .. $#possible_genes_sort;
+					$possible_genes_ID .= ",$possible_genes_sort[$_]" for 1 .. $#possible_genes_sort;
 				} else {
 					print $abu_handle "\tNA";
+					$possible_genes_ID = "NA";
 				}
 				
 				printf $abu_handle "\t%.2f", $read_count_isoform{$nc_SJ_chain}{$_}[2] for @{$samples_sort_ref};
 				print $abu_handle "\n";
-				&gtf_output($gtf_handle, $chr, "$isoform_ID", [$SJ_chain_read{$nc_SJ_chain}[1],$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'novel_isoform');
+				# gtf_output expects a 0-based start coordinate
+				my $zero_based_start = $SJ_chain_read{$nc_SJ_chain}[1] - 1;
+				&gtf_output($gtf_handle, $chr, "$isoform_ID", $possible_genes_ID, [$zero_based_start,$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'novel_isoform');
 			}
 			
 		}
@@ -1339,10 +1364,11 @@ sub process_results_for_chr {
 	}
 
 	while (my ($single_exon_isoform, $sample_ref) = each %single_exon_isoform_total){
-		print $abu_handle "$single_exon_isoform\t$isoform_info_ref->{$single_exon_isoform}[-1]\t$isoform_info_ref->{$single_exon_isoform}[0]";
+		my $gene_ID = $isoform_info_ref->{$single_exon_isoform}[0];
+		print $abu_handle "$single_exon_isoform\t$isoform_info_ref->{$single_exon_isoform}[-1]\t$gene_ID";
 		printf $abu_handle "\t%.2f", ${$sample_ref}{$_} for @{$samples_sort_ref};
 		print $abu_handle "\n";
-		&gtf_output($gtf_handle, $chr, $single_exon_isoform, [$single_exon_isoform_end_ref->{$single_exon_isoform}{'0'},$single_exon_isoform_end_ref->{$single_exon_isoform}{'1'}], [], $single_exon_isoform_end_ref->{$single_exon_isoform}{'strand'}, 'annotated_isoform');
+		&gtf_output($gtf_handle, $chr, $single_exon_isoform, $gene_ID, [$single_exon_isoform_end_ref->{$single_exon_isoform}{'0'},$single_exon_isoform_end_ref->{$single_exon_isoform}{'1'}], [], $single_exon_isoform_end_ref->{$single_exon_isoform}{'strand'}, 'annotated_isoform');
 
 	}
 
@@ -1377,8 +1403,8 @@ sub process_results_for_chr {
 }
 
 sub gtf_output {
-	my ($gtf_handle, $chr, $isoform_ID, $ends_ref, $SJs_ref, $strand, $type) = @_;
-	print $gtf_handle "$chr\t$type\ttranscript\t",${$ends_ref}[0]+1,"\t${$ends_ref}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\";\n";
+	my ($gtf_handle, $chr, $isoform_ID, $gene_ID, $ends_ref, $SJs_ref, $strand, $type) = @_;
+	print $gtf_handle "$chr\t$type\ttranscript\t",${$ends_ref}[0]+1,"\t${$ends_ref}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\"; gene_id \"$gene_ID\";\n";
 	if (@{$SJs_ref} > 0) {
 		my @exons = ([${$ends_ref}[0]+1]);
 		for my $SJ(@{$SJs_ref}) {
@@ -1388,10 +1414,10 @@ sub gtf_output {
 		}
 		push @{$exons[-1]}, ${$ends_ref}[1];
 		for my $exon_ID (0 .. $#exons) {
-			printf $gtf_handle "$chr\t$type\texon\t${$exons[$exon_ID]}[0]\t${$exons[$exon_ID]}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\"; exon_number \"%g\";\n", $exon_ID+1;
+			printf $gtf_handle "$chr\t$type\texon\t${$exons[$exon_ID]}[0]\t${$exons[$exon_ID]}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\"; gene_id \"$gene_ID\"; exon_number \"%g\";\n", $exon_ID+1;
 		}
 	} else {
-		print $gtf_handle "$chr\t$type\texon\t",${$ends_ref}[0]+1,"\t${$ends_ref}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\"; exon_number \"1\";\n";
+		print $gtf_handle "$chr\t$type\texon\t",${$ends_ref}[0]+1,"\t${$ends_ref}[1]\t.\t$strand\t.\ttranscript_id \"$isoform_ID\"; gene_id \"$gene_ID\"; exon_number \"1\";\n";
 	}
 }
 
@@ -1462,6 +1488,37 @@ sub valid_nc {
 		print $default_handle "not_validated: $chain\n" if defined $default_handle;
 		[0,\@fsm_unanno,\@ism_unanno, $valid_read_SJs_sort[0], scalar(@reads_info)];
 	}
+}
+
+sub compare_SJ_chains_as_numeric_tuples {
+	my ($chain_1, $chain_2) = @_;
+	my @vals_1 = split '_', $chain_1;
+	my @vals_2 = split '_', $chain_2;
+	my $len_1 = @vals_1;
+	my $len_2 = @vals_2;
+	my $shorter_len = $len_1 < $len_2 ? $len_1 : $len_2;
+	for my $i (0 .. ($shorter_len - 1)) {
+		my $cmp_result = $vals_1[$i] cmp $vals_2[$i];
+		if ($cmp_result == 0) {
+			next;
+		}
+		my $val_1_is_numeric = $vals_1[$i] =~ /^[0-9]+$/;
+		my $val_2_is_numeric = $vals_2[$i] =~ /^[0-9]+$/;
+		if ($val_1_is_numeric) {
+			if ($val_2_is_numeric) {
+				return $vals_1[$i] < $vals_2[$i] ? -1 : 1;
+			}
+			return -1;
+		}
+		if ($val_2_is_numeric) {
+			return 1;
+		}
+		return $vals_1[$i] lt $vals_2[$i] ? -1 : 1;
+	}
+	if ($len_1 == $len_2) {
+		return 0;
+	}
+	return $len_1 < $len_2 ? -1 : 1;
 }
 
 sub comp_SJ_chain{

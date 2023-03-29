@@ -49,10 +49,21 @@ def get_base_path_from_jobscript(jobscript):
     with open(jobscript) as f_handle:
         for line in f_handle:
             tokens = line.split()
+            # older versions of snakemake use this format
             if len(tokens) == 4:
                 if ((tokens[0] == 'cd' and tokens[2] == '&&'
                      and tokens[3] == '\\')):
                     base_path = tokens[1]
+                    if os.path.isdir(base_path):
+                        return os.path.abspath(base_path)
+            # newer versions of snakemake use this format
+            if len(tokens) >= 6:
+                if ((tokens[0] == 'cd'
+                     and tokens[2] == '&&'
+                     and tokens[5] == 'snakemake')):
+                    base_path = tokens[1]
+                    if base_path[0] == "'" and base_path[-1] == "'":
+                        base_path = base_path[1:-1]
                     if os.path.isdir(base_path):
                         return os.path.abspath(base_path)
 
