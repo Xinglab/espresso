@@ -432,6 +432,7 @@ rule run_espresso_s:
         script=os.path.join('scripts', 'espresso_s_wrapper.py'),
         espresso_s_path=os.path.join(config['espresso_path'], 'ESPRESSO_S.pl'),
         out_dir=lambda wildcards, output: os.path.dirname(output.updated_tsv),
+        tmp_dir='espresso_out',
     threads: config['espresso_s_threads']
     resources:
         mem_mb=config['espresso_s_mem_gb'] * 1024,
@@ -440,6 +441,7 @@ rule run_espresso_s:
         '{params.conda_wrapper} python {params.script}'
         ' --s-input {input.s_input}'
         ' --out-tsv {output.samples_tsv}'
+        ' --tmp-dir {params.tmp_dir}'
         ' --command'
         ' perl {params.espresso_s_path}'
         ' -A {input.gtf}'
@@ -467,6 +469,7 @@ checkpoint split_s_for_c:
         new_base_dir=os.path.join('espresso_out', 'c_work_dir'),
         target_reads_per_c=config['target_reads_per_espresso_c_job'],
         sort_memory_buffer_size='2G',
+        num_threads_per_c=config['espresso_c_threads'],
     resources:
         mem_mb=config['split_s_for_c_mem_gb'] * 1024,
         time_hours=config['split_s_for_c_time_hr'],
@@ -475,6 +478,7 @@ checkpoint split_s_for_c:
         ' --orig-work-dir {params.orig_work_dir}'
         ' --new-base-dir {params.new_base_dir}'
         ' --target-reads-per-c {params.target_reads_per_c}'
+        ' --num-threads-per-c {params.num_threads_per_c}'
         ' --genome-fasta {input.fasta}'
         ' --sort-memory-buffer-size {params.sort_memory_buffer_size}'
         ' 1> {log.out}'
@@ -490,7 +494,6 @@ rule run_espresso_c:
     input:
         updated_tsv=os.path.join('espresso_out', 'c_work_dir',
                                  'samples.tsv.updated'),
-        fasta=os.path.join('references', config['fasta_name']),
     output:
         done=touch(os.path.join('espresso_out', 'c_work_dir',
                                 'run_espresso_c_{updated_tsv_i}.done')),
@@ -505,6 +508,8 @@ rule run_espresso_c:
         keep_temp='-K' if config['keep_espresso_c_temp'] else '',
         out_dir=run_espresso_c_out_dir_param,
         sub_dir_i='0',
+        fasta=os.path.join('espresso_out', 'c_work_dir', 'fastas',
+                           '{updated_tsv_i}.fa'),
     threads: config['espresso_c_threads']
     resources:
         mem_mb=config['espresso_c_mem_gb'] * 1024,
@@ -513,7 +518,7 @@ rule run_espresso_c:
         '{params.conda_wrapper}'
         ' perl {params.espresso_c_path}'
         ' -I {params.out_dir}'
-        ' -F {input.fasta}'
+        ' -F {params.fasta}'
         ' -X {params.sub_dir_i}'
         ' -T {threads}'
         ' {params.keep_temp}'

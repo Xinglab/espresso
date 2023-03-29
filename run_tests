@@ -1,0 +1,25 @@
+#!/bin/bash
+
+function set_script_dir() {
+  local ORIG_DIR="$(pwd)" || return 1
+
+  local REL_SCRIPT_DIR="$(dirname ${BASH_SOURCE[0]})" || return 1
+  cd "${REL_SCRIPT_DIR}" || return 1
+  SCRIPT_DIR="$(pwd)" || return 1
+  cd "${ORIG_DIR}" || return 1
+}
+
+function main() {
+  set_script_dir || return 1
+  export PYTHONPATH="${SCRIPT_DIR}" || return 1
+
+  if [[ "$#" -eq 0 ]]; then
+    python "${SCRIPT_DIR}/tests/runner.py" || return 1
+  else
+    # run a specific test file if passed as an argument:
+    # ./run_tests tests/sirv_example/test.py
+    python "$1" || return 1
+  fi
+}
+
+main "$@"

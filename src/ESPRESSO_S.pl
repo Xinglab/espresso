@@ -135,14 +135,10 @@ Arguments:
 		mkdir $out or die "cannot mkdir $out: $!";
 	}
 
-	my @samtools_versions = qx(samtools --version | head -1);
-	my $tag_samtools = 0;
-	if (@samtools_versions > 0) {
-		my @line = split /\s+/, $samtools_versions[0];
-		my @version_tiny = split /[.]/, $line[1];
-		$tag_samtools = 1 if $version_tiny[0] >= 1 and $version_tiny[1] >= 6;
+	my $samtools_version_error = ESPRESSO_Version::check_samtools_version();
+	if ($samtools_version_error ne '') {
+		push @die_reason, "$samtools_version_error\n";
 	}
-	push @die_reason, "Please make sure samtools 1.6 or higher version is installed and included in \$PATH!\n" if $tag_samtools == 0;
 
 	my %sam_size;
 	my (%file_ID, @files_ID_sort, %sam_sample);
@@ -295,11 +291,7 @@ Arguments:
 		}
 	}
 
-	for my $thread_i (0 .. $#{$sam_distr_ref}) {
-		# dequeue() will block until the worker thread signals that it's done
-		$thread_output_queues[$thread_i]->dequeue();
-		print "Worker $thread_i finished reporting.\n";
-	}
+	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads);
 
 	print  '['.scalar(localtime)."] Re-cluster all reads\n";
 
@@ -328,8 +320,11 @@ Arguments:
 			unlink "$out/$num/group.list";
 		}
 	}
-	
-	while (my ($chr, $group_ref) = each %group_sep) {
+
+	# sort by $chr to get a consistent order for read groups
+	my @chr_sort = sort {$a cmp $b} keys %group_sep;
+	for my $chr (@chr_sort) {
+		my $group_ref = $group_sep{$chr};
 		if (keys %{$group_ref} > 0) {
 			my @group_sort = sort {${$group_ref}{$a}[0] <=> ${$group_ref}{$b}[0]} keys %{$group_ref};
 			push @group_sort_update, [$group_sort[0]];
@@ -610,18 +605,9 @@ Arguments:
 		}
 	}
 
-	for my $thread_i (0 .. $#{$sam_distr_ref}) {
-		# dequeue() will block until the worker thread signals that it's done
-		$thread_output_queues[$thread_i]->dequeue();
-		print "Worker $thread_i finished reporting.\n";
-	}
+	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads);
 
-	# cleanup threads
-	for my $thread_i (0 .. $#worker_threads) {
-		# the worker thread will see 'undef' on its queue after end() and exit
-		$thread_input_queues[$thread_i]->end();
-		$worker_threads[$thread_i]->join();
-	}
+	&cleanup_threads_and_exit_if_error(\@thread_input_queues, \@worker_threads);
 
 	print  '[', scalar(localtime), "] ESPRESSO_S finished its work.\n";
 
@@ -855,14 +841,17 @@ Arguments:
 			}
 			if (defined $pinhead) {
 				my $notSameStrand = &ten2b($line[1], 5);
+				my $is_secondary = &ten2b($line[1], 9);
 
-				if ($line[4] >= $mapq_cutoff and $line[2] ne $chrM) {
+				if ($line[4] >= $mapq_cutoff and $line[2] ne $chrM and !$is_secondary) {
 
 					my $msidn = &MSIDN_border($line[5], $cont_del_max);
 					
 					$line[11] =~ /NM:i:(\d+)/;
 					my $NM_num = $1;
-					die if !exists $chr_seq_len_ref->{$line[2]};
+					if (!exists $chr_seq_len_ref->{$line[2]}) {
+						die "chr name ($line[2]) not recognized for $line[0] in $file";
+					}
 					if (${$msidn}{'max_I'} >= $inserted_cont_cutoff){
 						next;
 					} elsif ($line[3] - 1 + ${$msidn}{'mappedGenomeN'} > $chr_seq_len_ref->{$line[2]}) {
@@ -1164,7 +1153,7 @@ Arguments:
 	}
 
 	sub MSIDN_border {
-		my @counts = split /[MSIDHN]/, $_[0];
+		my @counts = split /[MSIDHN=X]/, $_[0];
 		my $read_length_val = 0;
 		my ($not_mapped_num, $mapped_nt_genome, $mapped_nt_genomeN, $insertion_nt, $deletion_nt) = (0,0,0,0);
 		my $continuous_deletion_max = $_[1];
@@ -1192,7 +1181,7 @@ Arguments:
 				push @ID_from_current_SJ, [];
 				push @M_from_current_SJ, [];
 				$mapped_nt_genomeN += $counts[$i];
-			} elsif ($styles[$i] eq 'M') {
+			} elsif (($styles[$i] eq 'M') or ($styles[$i] eq '=') or ($styles[$i] eq 'X')) {
 				$exonIntron[-1] += $counts[$i];
 				$SJ_dist_read[-1] += $counts[$i];
 				$read_length_val += $counts[$i];
@@ -1229,6 +1218,8 @@ Arguments:
 				$max_I = $counts[$i] if $counts[$i] > $max_I;
 				push @{$ID_from_current_SJ[-1]}, [$counts[$i], 0, $dist_from_prev_SJ];
 				$dist_from_read_start += $counts[$i];
+			} else {
+				die "unexpected cigar operator $styles[$i]: $_[0]";
 			}
 		}
 		pop @SJ_dist_read;
@@ -1287,5 +1278,79 @@ Arguments:
 			$output_queue->enqueue(1);  # signal that work is done
 		}
 		$output_queue->end();
+	}
+
+	sub wait_for_threads_to_complete_work {
+		my ($num_threads, $thread_input_queues_ref, $thread_output_queues_ref, $worker_threads_ref) = @_;
+		my @running_threads = 0 .. ($num_threads - 1);
+		my @still_running_threads = ();
+		my $first_check = 1;
+		while (@running_threads) {
+			if ($first_check) {
+				$first_check = 0;
+			} else {
+				# Give the threads a chance to work
+				my $sleep_seconds = 5;
+				sleep $sleep_seconds;
+			}
+			for my $thread_i (@running_threads) {
+				my $thread_is_joinable = $worker_threads_ref->[$thread_i]->is_joinable();
+				my $thread_result = $thread_output_queues_ref->[$thread_i]->dequeue_nb();
+				if (defined($thread_result)) {
+					print "Worker $thread_i finished reporting.\n";
+				} elsif ($thread_is_joinable) {
+					# The thread should not be joinable until the work queue is ended.
+					# This thread must have had an error.
+					&cleanup_threads_and_exit_if_error($thread_input_queues_ref, $worker_threads_ref);
+				} else {
+					push @still_running_threads, $thread_i;
+				}
+			}
+
+			@running_threads = @still_running_threads;
+			@still_running_threads = ();
+		}
+	}
+
+	sub cleanup_threads_and_exit_if_error {
+		my ($thread_input_queues_ref, $worker_threads_ref) = @_;
+		my $sleep_seconds = 1;
+		my $any_error = 0;
+		for my $thread_i (0 .. $#{$worker_threads_ref}) {
+			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
+				print "Worker $thread_i terminated early.\n";
+				$any_error += 1;
+			}
+		}
+
+		# After end() is called on an input queue the worker will see
+		# 'undef' and then exit.
+		for my $thread_i (0 .. $#{$worker_threads_ref}) {
+			$thread_input_queues_ref->[$thread_i]->end();
+		}
+		# Give the threads a chance to exit
+		sleep $sleep_seconds;
+
+		for my $thread_i (0 .. $#{$worker_threads_ref}) {
+			if (!$worker_threads_ref->[$thread_i]->is_joinable()) {
+				print "Terminating worker $thread_i.\n";
+				$worker_threads_ref->[$thread_i]->kill('SIGTERM');
+				$any_error += 1;
+			}
+		}
+		# Give the threads a chance to exit
+		sleep $sleep_seconds;
+
+		for my $thread_i (0 .. $#{$worker_threads_ref}) {
+			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
+				$worker_threads_ref->[$thread_i]->join();
+			} else {
+				print "Worker $thread_i not responding.\n";
+				$any_error += 1;
+			}
+		}
+		if ($any_error) {
+			die "Exiting due to error in worker thread\n";
+		}
 	}
 }

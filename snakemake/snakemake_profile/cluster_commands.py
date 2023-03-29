@@ -1,3 +1,4 @@
+import datetime
 import os
 import os.path
 
@@ -76,7 +77,7 @@ def status_command(job_id):
     ]
 
 
-def try_extract_job_info_from_status_output(stdout, job_id):
+def try_extract_job_info_from_status_output(stdout, job_id, max_job_days):
     rows, error = _parse_rows(stdout)
     if error:
         return None, error
@@ -128,6 +129,15 @@ def try_extract_job_info_from_status_output(stdout, job_id):
 
     if status is None:
         return None, 'no status found'
+
+    if usage['start_time'] and usage['start_time'] != 'Unknown':
+        parsed_start = datetime.datetime.strptime(usage['start_time'],
+                                                  '%Y-%m-%dT%H:%M:%S')
+        now = datetime.datetime.now()
+        if (now - parsed_start).days > max_job_days:
+            # the status may be from a reused (old) job ID if the job was
+            # submitted very recently
+            return {'status': 'running', 'resource_usage': None}, None
 
     resource_usage = ('cpu: {cpu},'
                       ' end_time: {end_time},'

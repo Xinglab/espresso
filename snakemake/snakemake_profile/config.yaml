@@ -9,6 +9,7 @@ cluster-status: >-
   --retry-status-interval-seconds 30,120,300
   --resource-usage-dir ./snakemake_profile/job_resource_usage
   --resource-usage-min-interval 300
+  --max-job-days 60
 
 # 'jobs' has two interpretations:
 #  * if running with 'cluster'

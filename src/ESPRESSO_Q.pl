@@ -246,6 +246,10 @@ Arguments:
 	while (my ($chr, $isoform_ref) = each %isoform_SJ) {
 		while (my ($isoform, $SJ_ref) = each %{$isoform_ref}) {
 			my @exon_sort = sort {${$isoform_exon{$isoform}}{$a}[0] <=> ${$isoform_exon{$isoform}}{$b}[0]} keys %{$isoform_exon{$isoform}};
+			# TODO The use of '0' and '1' in multi_exon_isoform_end{$isoform} could
+			# conflict with an actual exon boundary at coordinate 0 or 1.
+			# Need to carefully check usage of multi_exon_isoform_end before
+			# updating code to use 'start' and 'end' instead of '0' and '1'
 			$multi_exon_isoform_end{$isoform}{'0'} = $isoform_exon{$isoform}{$exon_sort[0]}[0];
 			$multi_exon_isoform_end{$isoform}{'1'} = $isoform_exon{$isoform}{$exon_sort[-1]}[1];
 			$multi_exon_isoform_end{$isoform}{${$isoform_exon{$isoform}{$_}}[1]} = ${$isoform_exon{$isoform}{$_}}[0] for @exon_sort;
@@ -413,7 +417,7 @@ Arguments:
 
 	my @remaining_chrs = keys %chr_tmp_f;
 	while ((scalar @remaining_chrs) > 0) {
-		&cleanup_finished_threads(\%threads_by_id);
+		&cleanup_finished_threads(\%threads_by_id, \@worker_threads, \@thread_input_queues);
 
 		my @thread_ids = keys %threads_by_id;
 		for my $thread_id (@thread_ids) {
@@ -454,7 +458,7 @@ Arguments:
 
 	# Wait for any remaining threads
 	while (1) {
-		my $any_running = &cleanup_finished_threads(\%threads_by_id);
+		my $any_running = &cleanup_finished_threads(\%threads_by_id, \@worker_threads, \@thread_input_queues);
 		if ($any_running == 1) {
 			my $sleep_seconds = 10;
 			sleep $sleep_seconds;
@@ -507,37 +511,76 @@ Arguments:
 	close $tsv_compt_handle if defined $tsv_compt;
 	close $default_handle if defined $tmp_output;
 
-	# cleanup threads
 	&print_with_timestamp("cleaning up threads");
-	for my $thread_id (keys %threads_by_id) {
-		# the worker thread will see 'undef' on its queue after end() and exit
-		$thread_input_queues[$thread_id]->end();
-		$worker_threads[$thread_id]->join();
-		my $thread_error = $worker_threads[$thread_id]->error();
-		if ($thread_error) {
-			&print_with_timestamp("thread_id: $thread_id had error: $thread_error");
-		}
-	}
-
+	&cleanup_all_threads_and_exit_if_error(\@worker_threads, \@thread_input_queues);
 	&print_with_timestamp("ESPRESSO finished quantification");
 
 	sub cleanup_finished_threads {
-		my ($threads_by_id_ref) = @_;
+		my ($threads_by_id_ref, $worker_threads_ref, $thread_input_queues_ref) = @_;
 		my $any_running = 0;
 		my @thread_ids = keys %{$threads_by_id_ref};
 		for my $thread_id (@thread_ids) {
 			my $current_state = $threads_by_id_ref->{$thread_id};
-			if ($current_state eq $THREAD_RUNNING) {
-				my $is_done = defined $thread_output_queues[$thread_id]->dequeue_nb();
-				if ($is_done) {
-					$threads_by_id_ref->{$thread_id} = $THREAD_IDLE;
-					&print_with_timestamp("thread_id: $thread_id finished");
-				} else {
-					$any_running = 1;
-				}
+			if ($current_state ne $THREAD_RUNNING) {
+				next;
+			}
+			my $is_joinable = $worker_threads_ref->[$thread_id]->is_joinable();
+			my $is_done = defined $thread_output_queues[$thread_id]->dequeue_nb();
+			if ($is_done) {
+				$threads_by_id_ref->{$thread_id} = $THREAD_IDLE;
+				&print_with_timestamp("thread_id: $thread_id finished");
+			} elsif ($is_joinable) {
+				# The thread should not be joinable until the work queue is ended.
+				# This thread must have had an error.
+				&cleanup_all_threads_and_exit_if_error($worker_threads_ref, $thread_input_queues_ref);
+			} else {
+				$any_running = 1;
 			}
 		}
 		return $any_running;
+	}
+
+	sub cleanup_all_threads_and_exit_if_error {
+		my ($worker_threads_ref, $thread_input_queues_ref) = @_;
+		my $num_threads = scalar(@{$worker_threads_ref});
+		my $sleep_seconds = 1;
+		my $any_error = 0;
+		for my $thread_i (0 .. ($num_threads - 1)) {
+			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
+					&print_with_timestamp("Worker $thread_i terminated early.");
+					$any_error += 1;
+			}
+		}
+
+		# After end() is called on an input queue the worker will see
+		# 'undef' and then exit.
+		for my $thread_i (0 .. ($num_threads - 1)) {
+			$thread_input_queues_ref->[$thread_i]->end();
+		}
+		# Give the threads a chance to exit
+		sleep $sleep_seconds;
+
+		for my $thread_i (0 .. ($num_threads - 1)) {
+			if (!$worker_threads_ref->[$thread_i]->is_joinable()) {
+				&print_with_timestamp("Terminating worker $thread_i.");
+				$worker_threads_ref->[$thread_i]->kill('SIGTERM');
+				$any_error += 1;
+			}
+		}
+		# Give the threads a chance to exit
+		sleep $sleep_seconds;
+
+		for my $thread_i (0 .. ($num_threads - 1)) {
+			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
+				$worker_threads_ref->[$thread_i]->join();
+			} else {
+				&print_with_timestamp("Worker $thread_i not responding.");
+				$any_error += 1;
+			}
+		}
+		if ($any_error) {
+			die "Exiting due to error in worker thread\n";
+		}
 	}
 
 	# It seems that there may be a memory leak in ESPRESSO_Q_Thread.
@@ -556,7 +599,7 @@ Arguments:
 			my $return_code = system($command);
 			print "finished command: $command\n";
 			if ($return_code != 0) {
-				print "call for $command exited with return_code: $return_code\n";
+				die "call for $command exited with return_code: $return_code\n";
 			}
 			$output_queue->enqueue(1);  # signal that work is done
 		}
