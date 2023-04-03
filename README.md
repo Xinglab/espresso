@@ -2,6 +2,7 @@
 
 [![Latest Release](https://img.shields.io/github/release/Xinglab/espresso.svg?label=Latest%20Release)](https://github.com/Xinglab/espresso/releases/latest)
 [![Total GitHub Downloads](https://img.shields.io/github/downloads/Xinglab/espresso/total.svg?label=Total%20GitHub%20Downloads)](https://github.com/Xinglab/espresso/releases)
+[![Total Bioconda Installs](https://img.shields.io/conda/dn/bioconda/espresso.svg?label=Total%20Bioconda%20Installs)](https://anaconda.org/bioconda/espresso)
 
 ## About
 
