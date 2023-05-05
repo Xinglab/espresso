@@ -343,6 +343,15 @@ def add_mismatch_into_intron_number(alignment, junction_i=0, match_len=1):
     alignment.cigar.operations.insert(junction_op_i, new_op)
 
 
+def add_match_at_end_of_alignment(alignment, match_len):
+    if alignment.cigar.operations[-1].char == '=':
+        alignment.cigar.operations[-1].num += match_len
+        return
+
+    new_op = CigarOp(match_len, '=')
+    alignment.cigar.operations.append(new_op)
+
+
 def add_mismatch_in_exon(alignment,
                          exon_i=0,
                          offset_from_start=1,
@@ -683,11 +692,18 @@ class Gene(object):
         exon.sequence = new_exon_seq
 
     def set_intron_start_bases(self, intron_i=0, offset_from_start=2):
-        intron = self.introns[intron_i]
-        before_seq = intron.sequence[:offset_from_start]
-        after_seq = intron.sequence[offset_from_start + len(INTRON_START):]
-        new_intron_seq = '{}{}{}'.format(before_seq, INTRON_START, after_seq)
-        intron.sequence = new_intron_seq
+        if offset_from_start >= 0:
+            region = self.introns[intron_i]
+        else:
+            # for negative offset set bases in exon
+            region = self.exons[intron_i]
+            offset_from_end = -offset_from_start
+            offset_from_start = len(region.sequence) - offset_from_end
+
+        before_seq = region.sequence[:offset_from_start]
+        after_seq = region.sequence[offset_from_start + len(INTRON_START):]
+        new_seq = '{}{}{}'.format(before_seq, INTRON_START, after_seq)
+        region.sequence = new_seq
 
 
 class Chromosome(object):

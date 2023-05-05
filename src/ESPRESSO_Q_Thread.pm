@@ -765,56 +765,57 @@ sub process_results_for_chr {
 						my ($read_ID, $read_start, $read_end, $strand) = @{$read_info_ref};
 						my $sample = $read_info{$read_ID}{'sample'};
 						my (%fsm_SJ_chain_right, %read_compatible_isoform);
-						for my $isoform_fsm (@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}){
-							if (exists $multi_exon_isoform_end_ref->{$isoform_fsm}){
-								my $fsm_chain_from_isoform = $fsm_chain{$isoform_fsm};
+						for my $possible_isoform (@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}){
+							if (exists $multi_exon_isoform_end_ref->{$possible_isoform}){
+								my $fsm_chain_from_isoform = $fsm_chain{$possible_isoform};
 								# Multiple isoforms could have the same chain.
 								if (!exists $fsm_SJ_chain_right{$fsm_chain_from_isoform}) {
 									$fsm_SJ_chain_right{$fsm_chain_from_isoform} = 0;
 								}
-								$read_compatible_isoform{$isoform_fsm} = 0;
-								if( exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} and exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} and $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} - $SJ_dist <= $read_start and $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} + $SJ_dist >= $read_end ){
+								$read_compatible_isoform{$possible_isoform} = 0;
+								if( exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} and exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} and $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} - $SJ_dist <= $read_start and $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} + $SJ_dist >= $read_end ){
 									$fsm_SJ_chain_right{$fsm_chain_from_isoform} ++;
-									$read_compatible_isoform{$isoform_fsm} ++;
+									$read_compatible_isoform{$possible_isoform} ++;
 								}
-							} elsif ($isoform_fsm =~ /^\d+$/ and defined $nc_valid_longest[$isoform_fsm]){
-								$fsm_SJ_chain_right{$nc_valid_longest[$isoform_fsm]} ++;
-								$read_compatible_isoform{"ESPRESSO:$chr:$n:$isoform_fsm"} ++;
-
+							} elsif ($possible_isoform =~ /^\d+$/ and defined $nc_valid_longest[$possible_isoform]){
+								my $novel_chain = $nc_valid_longest[$possible_isoform];
+								my $novel_name = "ESPRESSO:$chr:$n:$possible_isoform";
+								if (!exists $fsm_SJ_chain_right{$novel_chain}) {
+									$fsm_SJ_chain_right{$novel_chain} = 0;
+								}
+								$read_compatible_isoform{$novel_name} = 0;
+								if ($SJ_chain_read_exon_end{$novel_chain}{'start'}{$ism_SJ_order[0]} - $SJ_dist <= $read_start and $SJ_chain_read_exon_end{$novel_chain}{'end'}{$ism_SJ_order[-1]} + $SJ_dist >= $read_end) {
+									$fsm_SJ_chain_right{$novel_chain} ++;
+									$read_compatible_isoform{$novel_name} ++;
+								}
 							} else {
-								die "don't know what fsm is for2 $ism_SJ_chain in group $n($group_start, $group_end): $isoform_fsm";
+								die "don't know what fsm is for2 $ism_SJ_chain in group $n($group_start, $group_end): $possible_isoform";
 							}
 						}
-						my @sort_chains;
 						my @valid_SJ_chain = grep {$fsm_SJ_chain_right{$_}>0} keys %fsm_SJ_chain_right;
 						if (scalar(@valid_SJ_chain)>=1) {
-							@sort_chains = sort {$a cmp $b} @valid_SJ_chain;
+							my @sort_chains = sort {$a cmp $b} @valid_SJ_chain;
 							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t" if $should_create_tsv_compt_handle;
 							my @valid_isoforms = grep {$read_compatible_isoform{$_}>0} keys %read_compatible_isoform;
 							if ($should_create_tsv_compt_handle) {
 								print $tsv_compt_handle "$_," for @valid_isoforms;
 								print $tsv_compt_handle "\n";
 							}
+
+							my $chains_compt_read_string = join(':', @sort_chains);
+							$chains_string_freq{$chains_compt_read_string}{$sample} ++;
 						} else {
-							@sort_chains = sort {$a cmp $b} keys %fsm_SJ_chain_right;
 							if ($should_create_tsv_compt_handle) {
 								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t";
-								print $tsv_compt_handle "$_," for keys %read_compatible_isoform;
-								print $tsv_compt_handle "\n";
+								print $tsv_compt_handle "NA\n";
 							}
 						}
-
-						my $chains_compt_read_string = join(':', @sort_chains);
-						$chains_string_freq{$chains_compt_read_string}{$sample} ++;
 					}
-					my $total_count = 0;
 					while (my ($chains_string, $sample_ref) = each %chains_string_freq) {
 						while (my ($sample, $count) = each %{$sample_ref}) {
 							push @{$ism_mt1_chain_count{$ism_SJ_chain}{$sample}}, [$chains_string, $count];
-							$total_count += $count;
 						}
 					}
-					die "$total_count!=@{$SJ_chain_read{$ism_SJ_chain}[-1]}" if $total_count!=@{$SJ_chain_read{$ism_SJ_chain}[-1]};
 					printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tEM\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
 				} else {
 					if ($should_create_tsv_compt_handle){
