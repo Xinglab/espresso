@@ -289,7 +289,7 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-206',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 75
+                'PC3E': 86
             },
             'ENST00000526025.2_2': {
                 'transcript_name': 'CD44-222',
@@ -319,13 +319,13 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-209',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 5,
-                'PC3E': 368
+                'PC3E': 404
             },
             'ENST00000531118.5_1': {
                 'transcript_name': 'CD44-232',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 3,
-                'PC3E': 10
+                'PC3E': 13
             },
             'ENST00000534296.5_1': {
                 'transcript_name': 'CD44-238',
@@ -342,44 +342,44 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
             'ENST00000263398.10_1': {
                 'transcript_name': 'CD44-201',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 1137,
-                'PC3E': 156
+                'GS689': 1144,
+                'PC3E': 182
             },
             'ENST00000428726.8_3': {
                 'transcript_name': 'CD44-208',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 21
+                'PC3E': 29
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 2): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 25
+                'PC3E': 18
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 3): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 32
+                'PC3E': 19
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 1): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 9,
-                'PC3E': 18
+                'GS689': 1,
+                'PC3E': 10
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 5): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 8,
-                'PC3E': 188
+                'GS689': 0,
+                'PC3E': 95
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 4): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 9,
-                'PC3E': 114
+                'GS689': 1,
+                'PC3E': 64
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 0): {
                 'transcript_name': 'NA',

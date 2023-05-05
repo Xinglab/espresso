@@ -86,6 +86,7 @@ def split_read_ids_from_temp_file(temp_path, sam_dir, new_c_dir_i,
         '--buffer-size',
         sort_memory_buffer_size,
     ]
+    os.environ['LC_ALL'] = 'C'  # ensure standard sorting behavior
     subprocess.run(sort_command, check=True)
     os.remove(temp_path)
 

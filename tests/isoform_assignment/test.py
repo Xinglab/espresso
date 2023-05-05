@@ -171,6 +171,44 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
         chromosome.name = chr_id_format.format(chr_i)
         self._chromosomes.append(chromosome)
 
+        chr_i += 1
+        gene_i += 1
+        # chr8: reads for an SJ chain should not be compatible with
+        # isoforms if the read goes --SJ_dist into an intron.
+        # gene has annotated exons [0, 1, 2, 3]
+        # novel isoform extends exon 1 by 10nt and skips exon 2 [0, 1', 3]
+        # [0, 1] could be assigned to either isoform
+        # [0, 1] and 35 into intron at end of read: no isoforms
+        # [0, 1] and 25 into intron at end of read: novel isoform
+        # [0, 1] and 15 into intron at end of read: either isoform
+        # EM init: ([0,1,2,3], 4), ([0,1',3], 2), ([0,1], (6 either, 2 novel))
+        # EM 1st pass: ([0,1,2,3], 8), ([0,1',3], 6)
+        # EM 2nd pass: ([0,1,2,3], 7.42), ([0,1',3], 6.58)
+        # EM 3rd pass: ([0,1,2,3], 7.07), ([0,1',3], 6.93)
+        # EM 4th pass: ([0,1,2,3], 7.03), ([0,1',3], 6.97)
+        gene = self._get_random_gene(num_exons=4)
+        gene.set_intron_start_bases(intron_i=1, offset_from_start=10)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        chromosome = self._make_chromosome_from_genes([gene])
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
+        chr_i += 1
+        gene_i += 1
+        # chr9: similar to chr8, but where the novel isoform shortens exon 1 by 10nt
+        # [0, 1] could be assigned to either isoform
+        # [0, 1] and 25 into intron at end of read: no isoforms
+        # [0, 1] and 15 into intron at end of read: annotated isoform
+        # [0, 1] and 5 into intron at end of read: either isoform
+        gene = self._get_random_gene(num_exons=4)
+        gene.set_intron_start_bases(intron_i=1, offset_from_start=-10)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        chromosome = self._make_chromosome_from_genes([gene])
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
         tests.base_test.write_fasta_from_chroms(fasta_path, self._chromosomes)
 
     def _create_test_gtf(self, gtf_path):
@@ -218,6 +256,12 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
 
         gene = self._chromosomes[6].genes[0]
         gene.add_isoform_for_exon_numbers([0], '0')
+
+        gene = self._chromosomes[7].genes[0]
+        gene.add_isoform_for_exon_numbers([0, 1, 2, 3], '0')
+
+        gene = self._chromosomes[8].genes[0]
+        gene.add_isoform_for_exon_numbers([0, 1, 2, 3], '0')
 
         tests.base_test.write_gtf_from_chroms(gtf_path, self._chromosomes)
 
@@ -336,6 +380,58 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
             chrom.name, chrom.genes[0], [0])
         tests.base_test.append_copies(alignments, alignment, 2)
 
+        chrom = self._chromosomes[7]
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1, 2, 3])
+        tests.base_test.append_copies(alignments, alignment, 4)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1, 3])
+        tests.base_test.adjust_start_of_junction(alignment,
+                                                 junction_i=1,
+                                                 offset=10)
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment, 4)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 35)
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 25)
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 15)
+        tests.base_test.append_copies(alignments, alignment, 2)
+
+        chrom = self._chromosomes[8]
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1, 2, 3])
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1, 3])
+        tests.base_test.adjust_start_of_junction(alignment,
+                                                 junction_i=1,
+                                                 offset=-10)
+        tests.base_test.append_copies(alignments, alignment, 4)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment, 4)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 25)
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 15)
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.add_match_at_end_of_alignment(alignment, 5)
+        tests.base_test.append_copies(alignments, alignment, 2)
+
         read_id_offset += tests.base_test.write_sam_from_alignments(
             sam_path, self._chromosomes, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(sam_path)
@@ -368,8 +464,9 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
                 os.path.join(self._work_dir,
                              '{}_SJ_simplified.list'.format(chrom.name)))
 
-        chr_7_sj_simplified = sj_simplified_lists[6]
-        sj_lists_without_6 = sj_simplified_lists[:6]
+        # chr7 is a single exon isoform
+        sj_lists_without_7 = sj_simplified_lists[:]
+        chr_7_sj_simplified = sj_lists_without_7.pop(6)
 
         all_sjs = os.path.join(self._work_dir, 'SJ_group_all.fa')
         sam_list = os.path.join(self._work_dir, '0', 'sam.list3')
@@ -377,7 +474,7 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
 
         self._assert_exists_and_non_empty(
             [self._samples_updated, all_sjs, sam_list, sj_list] +
-            sj_lists_without_6)
+            sj_lists_without_7)
         self._assert_does_not_exist_or_is_empty([chr_7_sj_simplified])
 
     def _run_espresso_c(self):
@@ -691,6 +788,74 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
             self._chromosomes[6].genes[0].isoforms[0].id)
         expected_isoform['transcript_name'] = (
             self._chromosomes[6].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+
+        # chr8: [0, 1, 2, 3]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[7].name
+        expected_isoform['gene'] = self._chromosomes[7].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[2])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[3])
+        expected_isoform['abundance'] = {self._test_name: 7.03}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[7].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[7].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # [0, 1, 3]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[7].name
+        expected_isoform['gene'] = self._chromosomes[7].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(
+            expected_isoform['gene'].exons[1].copy())
+        orig_end = expected_isoform['exons'][-1].end
+        expected_isoform['exons'][-1].end += 10
+        chrom_sequence = self._chromosomes[7].get_sequence_and_set_coords()
+        extra_sequence = chrom_sequence[orig_end + 1:orig_end + 11]
+        expected_isoform['exons'][-1].sequence += extra_sequence
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[3])
+        expected_isoform['abundance'] = {self._test_name: 6.97}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[7].name, 7,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+
+        # chr9: [0, 1, 2, 3]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[8].name
+        expected_isoform['gene'] = self._chromosomes[8].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[2])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[3])
+        expected_isoform['abundance'] = {self._test_name: 6.97}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[8].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[8].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # [0, 1, 3]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[8].name
+        expected_isoform['gene'] = self._chromosomes[8].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(
+            expected_isoform['gene'].exons[1].copy())
+        expected_isoform['exons'][-1].end -= 10
+        expected_isoform['exons'][-1].sequence = (
+            expected_isoform['exons'][-1].sequence[:-10])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[3])
+        expected_isoform['abundance'] = {self._test_name: 7.03}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[8].name, 8,
+                                                  0))
         expected_isoforms.append(expected_isoform)
 
         expected_by_id = self._get_transcript_ids_from_detected(
