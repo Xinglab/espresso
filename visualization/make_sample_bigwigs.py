@@ -134,10 +134,15 @@ def merge_chrom_bedgraphs(chrom_bedgraphs, output_path, temp_dir_path, sample):
     # bedGraphToBigWig requires sorted input
     # 1st sort alphabetically on column 1 (chrom): -k1,1
     # then sort numerically on column 2 (start): -k2,2n
+    # It also requires case-sensitive sort with LC_COLLATE=C
     sort_bedgraph_cmd = ['sort', '-k1,1', '-k2,2n', unsorted_bedgraph_path]
     with open(output_path, 'ab') as output_handle:
         print(sort_bedgraph_cmd)
-        subprocess.run(sort_bedgraph_cmd, check=True, stdout=output_handle)
+        sort_env = {'LC_COLLATE': 'C'}
+        subprocess.run(sort_bedgraph_cmd,
+                       check=True,
+                       stdout=output_handle,
+                       env=sort_env)
 
 
 def main():
