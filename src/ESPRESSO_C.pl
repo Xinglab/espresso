@@ -771,7 +771,14 @@ Arguments:
 							#print ALLSJ "reviseN: $index_ori($current_cluster_SJ_number): $last_read($pos:$read_length:$notSameStrand:@{$last_read2extract{$pos}}): $i($#sort_pos_SJ)\n";
 							if ($i == $#sort_pos_SJ) {
 								if ( ($last_read2extract{$pos}[1-$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[1-$notSameStrand] > 0)) and $pos+$SJFS_dist_add+2*$SJFS_dist<$read_length ) {
-									substr($read_seq4blast, $pos+$SJFS_dist_add+2*$SJFS_dist) = 'N' x ($read_length-$pos-$SJFS_dist_add-2*$SJFS_dist);
+									eval {
+										substr($read_seq4blast, $pos+$SJFS_dist_add+2*$SJFS_dist) = 'N' x ($read_length-$pos-$SJFS_dist_add-2*$SJFS_dist);
+										1;
+									} or do {
+										my $error = $@;
+										print "error with read_ID: ${$read_info_ref}{'readID'}, read_seq4blast: $read_seq4blast\n";
+										die "$error";
+									}
 								}
 							} if ( $i == 0 ) {
 								if ( ($last_read2extract{$pos}[$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[$notSameStrand] > 0)) and $pos-$SJFS_dist_add-2*$SJFS_dist>0 ) {
