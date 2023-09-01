@@ -769,18 +769,24 @@ Arguments:
 				
 				$line[$output_titles_ID_ref->{'SJcorSeqRef'}] = join ',', @SJcorSeq_strings;
 			}
+
+			my $out_line = "";
 			for my $i (0 .. $#line-1) {
-				print READ3 "$line[$i]\t";
+				$out_line .= "$line[$i]\t";
 			}
 
 			if ( $line[$output_titles_ID_ref->{'readSeq'}] ne 'NA' ) {
-				print READ3 "$line[-1]\n";
+				$out_line .= "$line[-1]\n";
 			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' and exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and defined $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3] ) {
-				print READ3 "$read_info{$line[$output_titles_ID_ref->{'readID'}]}[3]\n";
+				my $read_seq = $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3];
+				if ($read_seq eq 'short') {
+					next;
+				}
+				$out_line .= "$read_seq\n";
 			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' ) {
-				print READ3 "read_not_recorded\n";
+				$out_line .= "read_not_recorded\n";
 			}
-
+			print READ3 $out_line;
 		}
 		close READ;
 		close READ3;
