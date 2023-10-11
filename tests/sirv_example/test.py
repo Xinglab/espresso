@@ -146,11 +146,11 @@ class SirvExampleTest(tests.base_test.BaseTest):
         expected_transcripts = {
             'SIRV201': {
                 'gene_id': 'SIRV2',
-                'abundance': 296
+                'abundance': 297
             },
             'SIRV202': {
                 'gene_id': 'SIRV2',
-                'abundance': 2407
+                'abundance': 2400
             },
             'SIRV203': {
                 'gene_id': 'SIRV2',

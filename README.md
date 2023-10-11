@@ -3,6 +3,7 @@
 [![Latest Release](https://img.shields.io/github/release/Xinglab/espresso.svg?label=Latest%20Release)](https://github.com/Xinglab/espresso/releases/latest)
 [![Total GitHub Downloads](https://img.shields.io/github/downloads/Xinglab/espresso/total.svg?label=Total%20GitHub%20Downloads)](https://github.com/Xinglab/espresso/releases)
 [![Total Bioconda Installs](https://img.shields.io/conda/dn/bioconda/espresso.svg?label=Total%20Bioconda%20Installs)](https://anaconda.org/bioconda/espresso)
+[![Total Docker Pulls](https://img.shields.io/docker/pulls/xinglab/espresso.svg?label=Total%20Docker%20Pulls)](https://hub.docker.com/r/xinglab/espresso)
 
 ## About
 
@@ -215,6 +216,8 @@ Arguments:
           thread number (default: minimum of 5 and sam file number)
     -Q, --mapq_cutoff
           min mapping quality for processing (default: 1)
+    --sort_buffer_size
+          memory buffer size for running 'sort' commands (default: 2G)
 ```
 
 ```
@@ -235,6 +238,8 @@ Arguments:
 
     -T, --num_thread
           thread number (default: 5)
+    --sort_buffer_size
+          memory buffer size for running 'sort' commands (default: 2G)
 ```
 
 ```
@@ -265,6 +270,17 @@ Arguments:
     -R, --read_ratio_cutoff
           min perfect read ratio for all splice junctions of novel isoform
           (default: 0)
+    -S, --SJ_dist
+          max number of bases that an alignment endpoint can extend past the
+          start or end of a matched isoform
+          (default: 35)
+    --internal_boundary_limit
+          max number of bases that an alignment endpoint can extend into an
+          intron of a matched isoform
+          (default: 6)
+    --allow_longer_terminal_exons
+          allow an alignment to match an isoform even if the alignment endpoint
+          extends more than --SJ_dist past the start or end
 ```
 
 ## Output
@@ -281,7 +297,13 @@ The three main output files are:
 * `sample_N2_R0_compatible_isoform.tsv` is a tsv file for compatible isoforms of each read.
   + This file is only produced if the -V parameter of ESPRESSO_Q is used.
   + The columns are `read_id`, `sample_name`, `read_classification`, `compatible_isoforms`.
-  + The possible classifications are NIC/NNC, NCD, ISM, FSM, single-exon.
+  + The possible classifications are NIC, NNC, NCD, ISM, FSM, single-exon.
+
+Each step also produces a file with summary counts:
+* `espresso_s_summary.txt`
+* `{input_ID}/espresso_c_summary.txt`
+  + The C step summaries can be combined with [snakemake/scripts/combine_c_step_summary_files.py](snakemake/scripts/combine_c_step_summary_files.py)
+* `espresso_q_summary.txt`
 
 ## Visualization
 

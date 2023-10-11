@@ -7,7 +7,7 @@ use File::Basename qw(dirname);
 use File::Temp qw(tempfile);
 use IPC::Open3;
 
-my $version_number = '1.3.2';
+my $version_number = '1.4.0';
 
 sub get_version_number {
     return $version_number;

@@ -2,7 +2,7 @@ package ESPRESSO_Q_Thread;
 
 use strict;
 
-use Storable qw(retrieve);
+use Storable qw(store retrieve);
 
 if ($0 =~ /ESPRESSO_Q_Thread/) {
 	# Run as a script
@@ -29,6 +29,8 @@ sub main {
 	my $keep_tmp = $shared_arguments_ref->{'keep_tmp'};
 	my $target_col_index = $shared_arguments_ref->{'target_col_index'};
 	my $SJ_dist = $shared_arguments_ref->{'SJ_dist'};
+	my $internal_boundary_limit = $shared_arguments_ref->{'internal_boundary_limit'};
+	my $allow_longer_terminal_exons = $shared_arguments_ref->{'allow_longer_terminal_exons'};
 	my $raw = $shared_arguments_ref->{'raw'};
 	my $read_num_cutoff = $shared_arguments_ref->{'read_num_cutoff'};
 	my $read_ratio_cutoff = $shared_arguments_ref->{'read_ratio_cutoff'};
@@ -42,11 +44,11 @@ sub main {
 	my $anno_SJ_complete_ref = $chr_arguments_ref->{'anno_SJ_complete'};
 	my $isoform_SJ_complete_ref = $chr_arguments_ref->{'isoform_SJ_complete'};
 
-	&process_results_for_chr($chr, $out_dir, $anno_SJ_ref, $exists_chr_tmp_sj, $single_exon_isoform_end_ref, $anno_SS_ref, $isoform_SJ_ref, $multi_exon_isoform_end_ref, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $samples_sort_ref, $isoform_info_ref, $strand_symbol_ref, $should_create_default_handle, $should_create_tsv_compt_handle, $keep_tmp, $target_col_index, $SJ_dist, $raw, $read_num_cutoff, $read_ratio_cutoff, $max_iterate);
+	&process_results_for_chr($chr, $out_dir, $anno_SJ_ref, $exists_chr_tmp_sj, $single_exon_isoform_end_ref, $anno_SS_ref, $isoform_SJ_ref, $multi_exon_isoform_end_ref, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $samples_sort_ref, $isoform_info_ref, $strand_symbol_ref, $should_create_default_handle, $should_create_tsv_compt_handle, $keep_tmp, $target_col_index, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, $raw, $read_num_cutoff, $read_ratio_cutoff, $max_iterate);
 }
 
 sub process_results_for_chr {
-	my($chr, $out_dir, $anno_SJ_ref, $exists_chr_tmp_sj, $single_exon_isoform_end_ref, $anno_SS_ref, $isoform_SJ_ref, $multi_exon_isoform_end_ref, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $samples_sort_ref, $isoform_info_ref, $strand_symbol_ref, $should_create_default_handle, $should_create_tsv_compt_handle, $keep_tmp, $target_col_index, $SJ_dist, $raw, $read_num_cutoff, $read_ratio_cutoff, $max_iterate) = @_;
+	my($chr, $out_dir, $anno_SJ_ref, $exists_chr_tmp_sj, $single_exon_isoform_end_ref, $anno_SS_ref, $isoform_SJ_ref, $multi_exon_isoform_end_ref, $anno_SJ_complete_ref, $isoform_SJ_complete_ref, $samples_sort_ref, $isoform_info_ref, $strand_symbol_ref, $should_create_default_handle, $should_create_tsv_compt_handle, $keep_tmp, $target_col_index, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, $raw, $read_num_cutoff, $read_ratio_cutoff, $max_iterate) = @_;
 	my %chr_type;
 	my $tmp_f = $out_dir."/$chr.read_final.tmp";
 	my $tmp_sj = $out_dir."/$chr.all_SJ.tmp";
@@ -59,6 +61,7 @@ sub process_results_for_chr {
 	my $gtf_path = &gtf_path_for_chr($chr, $out_dir);
 	open(my $gtf_handle, ">", $gtf_path) or die "cannot write $gtf_path: $!";
 
+	my %summary_data;
 	my %SJ_read_improved;
 	my %read_filtered;
 	my %read_info;
@@ -102,6 +105,7 @@ sub process_results_for_chr {
 		}
 	}
 	close $tmp_f_handle;
+	$summary_data{'num_reads_with_failed_SJ'} = scalar keys %read_filtered;
 
 	if ($exists_chr_tmp_sj) {
 		open(my $tmp_sj_handle,  "<", $tmp_sj) or die "cannot open $tmp_sj: $!";
@@ -267,8 +271,13 @@ sub process_results_for_chr {
 						push @{$fsm{$read}}, $_ for @fsm_isoforms;
 						$chr_type{$chr}{'fsm'} ++;
 						for my $fsm_isoform (@fsm_isoforms) {
-							if ( abs(${$read_info_ref}{'start'}-$multi_exon_isoform_end_ref->{$fsm_isoform}{'0'}) <= $SJ_dist and abs(${$read_info_ref}{'end'}-$multi_exon_isoform_end_ref->{$fsm_isoform}{'1'}) <= $SJ_dist ) {
+							my $expected_start = $multi_exon_isoform_end_ref->{$fsm_isoform}{'0'};
+							my $expected_end = $multi_exon_isoform_end_ref->{$fsm_isoform}{'1'};
+							my $actual_start = ${$read_info_ref}{'start'};
+							my $actual_end = ${$read_info_ref}{'end'};
+							if (&check_fsm_perfect_match_endpoints($expected_start, $expected_end, $actual_start, $actual_end, $SJ_dist)) {
 								push @{$isoform_perfect_match{$fsm_isoform}{${$read_info_ref}{'sample'}}}, $read;
+								$summary_data{'num_fsm_perfect_match_reads'} ++;
 							}
 						}
 
@@ -293,6 +302,11 @@ sub process_results_for_chr {
 				print $default_handle "$read\t$read_info{$read}{'ori_ID'}\tall\tone-exon\tNA\t$chr\n" if $should_create_default_handle;
 			}
 		}
+		$summary_data{'num_fsm_reads'} += scalar keys %fsm;
+		$summary_data{'num_ism_reads'} += scalar keys %ism;
+		$summary_data{'num_nic_reads'} += scalar keys %nic;
+		$summary_data{'num_nnc_reads'} += scalar keys %nnc;
+		$summary_data{'num_single_exon_reads'} += scalar @single_exon_reads;
 
 		my %all_SJ_group;
 		
@@ -394,16 +408,30 @@ sub process_results_for_chr {
 				}
 			}
 		}
-
+		$summary_data{'num_fsm_chains'} += scalar keys %{$SJ_chain_cat{'fsm'}};
+		$summary_data{'num_ism_chains'} += scalar keys %{$SJ_chain_cat{'ism'}};
+		$summary_data{'num_nic_chains'} += scalar keys %{$SJ_chain_cat{'nic'}};
+		$summary_data{'num_nnc_chains'} += scalar keys %{$SJ_chain_cat{'nnc'}};
+		$summary_data{'num_chains_with_failed_SJ'} += scalar keys %{$SJ_chain_cat{'filtered'}};
 
 		my (%SJ_chain_read_exon_end, %SJ_included_chain);
 		while (my ($SJ_chain, $SJ_chain_info) = each %SJ_chain_read) {
-			#
 			my @SJ_IDs = split '_', $SJ_chain;
+			# Use the median start and end coordinates as the chain start and end.
+			# For an even number of reads there are two middle reads.
+			# Choose the middle read separately for start and end,
+			# and pick the middle read that makes the exon longer.
 			my @start_reads_sort = sort {${$a}[1] <=> ${$b}[1]} @{${$SJ_chain_info}[-1]};
 			my @end_reads_sort = sort {${$a}[2] <=> ${$b}[2]} @{${$SJ_chain_info}[-1]};
-			$SJ_chain_read{$SJ_chain}[1] = ${$start_reads_sort[int(@start_reads_sort/2)]}[1];
-			$SJ_chain_read{$SJ_chain}[2] = ${$end_reads_sort[int(@end_reads_sort/2)]}[2];
+			my $middle_index = int(@start_reads_sort / 2);
+			my $middle_start_index = $middle_index;
+			my $middle_end_index = $middle_index;
+			my $has_even_read_count = (@start_reads_sort % 2) == 0;
+			if ($has_even_read_count) {
+				$middle_start_index--;
+			}
+			$SJ_chain_read{$SJ_chain}[1] = ${$start_reads_sort[$middle_start_index]}[1];
+			$SJ_chain_read{$SJ_chain}[2] = ${$end_reads_sort[$middle_end_index]}[2];
 			next if defined $raw;
 			for my $SJ_ID_i (0 .. $#SJ_IDs) {
 				push @{$SJ_included_chain{$SJ_IDs[$SJ_ID_i]}}, $SJ_chain if $SJ_IDs[$SJ_ID_i] ne 'x'; #record chain in to hash with keys as SJ
@@ -483,10 +511,17 @@ sub process_results_for_chr {
 				my @SJs_i = split '_', $nnc_valid_all[$i];
 				for my $j ($i+1 .. $#nnc_valid_all){
 					next unless exists ${$SJ_chain_read{$nnc_valid_all[$i]}[-2]}{$nnc_valid_all[$j]};
-					my $comp_result = &comp_SJ_chain($nnc_valid_all[$i], $nnc_valid_all[$j]);
+					my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($nnc_valid_all[$i], $nnc_valid_all[$j]);
 					print $default_handle "$nnc_valid_all[$i]\t$nnc_valid_all[$j]\t$comp_result\t$SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'start'}{$SJs_i[0]}\t$SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'end'}{$SJs_i[-1]}\t$SJ_chain_read{$nnc_valid_all[$i]}[1]\t$SJ_chain_read{$nnc_valid_all[$i]}[2]\n" if $should_create_default_handle;
 					if ($comp_result == 2) {
-						push @{$substring_nc{$nnc_valid_all[$i]}}, $nnc_valid_all[$j] if $SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$nnc_valid_all[$i]}[1] and $SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$nnc_valid_all[$i]}[2];
+						my @SJs_j = split '_', $nnc_valid_all[$j];
+						my $expected_start = $SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'start'}{$SJs_i[0]};
+						my $is_expected_start_terminal = $SJs_i[0] == $SJs_j[0];
+						my $expected_end = $SJ_chain_read_exon_end{$nnc_valid_all[$j]}{'end'}{$SJs_i[-1]};
+						my $is_expected_end_terminal = $SJs_i[-1] == $SJs_j[-1];
+						my $actual_start = $SJ_chain_read{$nnc_valid_all[$i]}[1];
+						my $actual_end = $SJ_chain_read{$nnc_valid_all[$i]}[2];
+						push @{$substring_nc{$nnc_valid_all[$i]}}, $nnc_valid_all[$j] if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 					}
 				}
 			}
@@ -497,6 +532,7 @@ sub process_results_for_chr {
 				}
 			}
 		}
+		$summary_data{'num_validated_nnc_chains'} += scalar @nnc_valid_all;
 		if (exists $SJ_chain_cat{'nic'}) {
 			# Sort on chain length, but break ties with compare_SJ_chains_as_numeric_tuples.
 			# The tie break ensures consistent novel isoform IDs.
@@ -517,10 +553,17 @@ sub process_results_for_chr {
 				my @SJs_i = split '_', $nic_valid_all[$i];
 				for my $j ($i+1 .. $#nic_valid_all){
 					next unless exists ${$SJ_chain_read{$nic_valid_all[$i]}[-2]}{$nic_valid_all[$j]};
-					my $comp_result = &comp_SJ_chain($nic_valid_all[$i], $nic_valid_all[$j]);
+					my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($nic_valid_all[$i], $nic_valid_all[$j]);
 					print $default_handle "$nic_valid_all[$i]\t$nic_valid_all[$j]\t$comp_result\t$SJ_chain_read_exon_end{$nic_valid_all[$j]}{'start'}{$SJs_i[0]}\t$SJ_chain_read_exon_end{$nic_valid_all[$j]}{'end'}{$SJs_i[-1]}\t$SJ_chain_read{$nic_valid_all[$i]}[1]\t$SJ_chain_read{$nic_valid_all[$i]}[2]\n" if $should_create_default_handle;
 					if ($comp_result == 2) {
-						push @{$substring_nc{$nic_valid_all[$i]}}, $nic_valid_all[$j] if $SJ_chain_read_exon_end{$nic_valid_all[$j]}{'start'}{$SJs_i[0]}- $SJ_dist <= $SJ_chain_read{$nic_valid_all[$i]}[1] and $SJ_chain_read_exon_end{$nic_valid_all[$j]}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$nic_valid_all[$i]}[2];
+						my @SJs_j = split '_', $nic_valid_all[$j];
+						my $expected_start = $SJ_chain_read_exon_end{$nic_valid_all[$j]}{'start'}{$SJs_i[0]};
+						my $is_expected_start_terminal = $SJs_i[0] == $SJs_j[0];
+						my $expected_end = $SJ_chain_read_exon_end{$nic_valid_all[$j]}{'end'}{$SJs_i[-1]};
+						my $is_expected_end_terminal = $SJs_i[-1] == $SJs_j[-1];
+						my $actual_start = $SJ_chain_read{$nic_valid_all[$i]}[1];
+						my $actual_end = $SJ_chain_read{$nic_valid_all[$i]}[2];
+						push @{$substring_nc{$nic_valid_all[$i]}}, $nic_valid_all[$j] if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 					}
 				}
 			}
@@ -529,9 +572,16 @@ sub process_results_for_chr {
 				my @SJs_i = split '_', $chain;
 				while (my ($nc_chain, undef) = each %longest_nc_valid) {
 					next unless exists ${$SJ_chain_read{$chain}[-2]}{$nc_chain};
-					my $comp_result = &comp_SJ_chain($chain, $nc_chain);
+					my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($chain, $nc_chain);
 					if ($comp_result == 2) {
-						push @{$substring_nc{$chain}}, $nc_chain if $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$chain}[1] and $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$chain}[2];
+						my @SJs_j = split '_', $nc_chain;
+						my $expected_start = $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]};
+						my $is_expected_start_terminal = $SJs_i[0] == $SJs_j[0];
+						my $expected_end = $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]};
+						my $is_expected_end_terminal = $SJs_i[-1] == $SJs_j[-1];
+						my $actual_start = $SJ_chain_read{$chain}[1];
+						my $actual_end = $SJ_chain_read{$chain}[2];
+						push @{$substring_nc{$chain}}, $nc_chain if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 					}
 				}
 				if (!exists $substring_nc{$chain}) {
@@ -541,6 +591,7 @@ sub process_results_for_chr {
 			}
 			$longest_nc_valid{$_} = $longest_nic_valid{$_} for keys %longest_nic_valid;
 		}
+		$summary_data{'num_validated_nic_chains'} += scalar @nic_valid_all;
 
 		if (exists $SJ_chain_cat{'ism'}) {
 			# Sort on chain length, but break ties with compare_SJ_chains_as_numeric_tuples.
@@ -561,7 +612,17 @@ sub process_results_for_chr {
 				my $compatible_annotated_fsm_num = 0;
 				for my $isoform_fsm(@{$SJ_chain_cat{'ism'}{$chain}[1]}) {
 					if (exists $multi_exon_isoform_end_ref->{$isoform_fsm}){
-						if( exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[0]]}[1]} and exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[-1]]}[2]} and $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[0]]}[1]} - $SJ_dist <= $SJ_chain_read{$chain}[1] and $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[-1]]}[2]} + $SJ_dist >= $SJ_chain_read{$chain}[2] ){
+						next unless exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[0]]}[1]};
+						next unless exists $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[-1]]}[2]};
+						my $expected_first_start = $multi_exon_isoform_end_ref->{$isoform_fsm}{'0'};
+						my $expected_last_end = $multi_exon_isoform_end_ref->{$isoform_fsm}{'1'};
+						my $expected_start = $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[0]]}[1]};
+						my $is_expected_start_terminal = $expected_start == $expected_first_start;
+						my $expected_end = $multi_exon_isoform_end_ref->{$isoform_fsm}{$anno_SJ_ref->{$all_SJ_group_sort[$SJs_i[-1]]}[2]};
+						my $is_expected_end_terminal = $expected_end == $expected_last_end;
+						my $actual_start = $SJ_chain_read{$chain}[1];
+						my $actual_end = $SJ_chain_read{$chain}[2];
+						if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 							$compatible_annotated_fsm_num ++;
 							push @isoforms_fsm_valid, $isoform_fsm if exists $SJ_chain_read{$fsm_chain{$isoform_fsm}};	#check if there is any full length annotated isoform for this chain
 						}
@@ -586,21 +647,41 @@ sub process_results_for_chr {
 				my @SJs_i = split '_', $possible_nc_ism[$i];
 				for my $j ($i+1 .. $#possible_nc_ism){
 					next unless exists ${$SJ_chain_read{$possible_nc_ism[$i]}[-2]}{$possible_nc_ism[$j]};
-					my $comp_result = &comp_SJ_chain($possible_nc_ism[$i], $possible_nc_ism[$j]);
+					my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($possible_nc_ism[$i], $possible_nc_ism[$j]);
 					print $default_handle "$possible_nc_ism[$i]\t$possible_nc_ism[$j]\t$comp_result\t$SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'start'}{$SJs_i[0]}\t$SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'end'}{$SJs_i[-1]}\t$SJ_chain_read{$possible_nc_ism[$i]}[1]\t$SJ_chain_read{$possible_nc_ism[$i]}[2]\n" if $should_create_default_handle;
 					if ($comp_result == 2) {
-						push @{$substring_nc{$possible_nc_ism[$i]}}, $possible_nc_ism[$j] if $SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$possible_nc_ism[$i]}[1] and $SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$possible_nc_ism[$i]}[2];
+						my @SJs_j = split '_', $possible_nc_ism[$j];
+						my $expected_start = $SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'start'}{$SJs_i[0]};
+						my $is_expected_start_terminal = $SJs_i[0] == $SJs_j[0];
+						my $expected_end = $SJ_chain_read_exon_end{$possible_nc_ism[$j]}{'end'}{$SJs_i[-1]};
+						my $is_expected_end_terminal = $SJs_i[-1] == $SJs_j[-1];
+						my $actual_start = $SJ_chain_read{$possible_nc_ism[$i]}[1];
+						my $actual_end = $SJ_chain_read{$possible_nc_ism[$i]}[2];
+						push @{$substring_nc{$possible_nc_ism[$i]}}, $possible_nc_ism[$j] if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 					}
 				}
 			}
 
-			for my $chain (@possible_nc_ism) {
+			# Process possible_nc_ism chains from longest to shortest in this loop.
+			# That way the longer chains can be added as nc_valid_longest before the
+			# shorter chains are checked against all nc_valid_longest chains.
+			for my $chain (reverse @possible_nc_ism) {
 				my @SJs_i = split '_', $chain;
 				for my $nc_chain (@nc_valid_longest){   #compare valid ism chains without full length annotated isoform to valid longest nc chians
 					next unless exists ${$SJ_chain_read{$chain}[-2]}{$nc_chain};
-					my $comp_result = &comp_SJ_chain($chain, $nc_chain);
+					# nc_chain could be a possible_nc_ism chain.
+					# In that case it may already be added as a substring.
+					next if grep {/^$nc_chain$/} @{$substring_nc{$chain}};
+					my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($chain, $nc_chain);
 					if ($comp_result == 2) {
-						push @{$substring_nc{$chain}}, $nc_chain if $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$chain}[1] and $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$chain}[2];
+						my @SJs_j = split '_', $nc_chain;
+						my $expected_start = $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]};
+						my $is_expected_start_terminal = $SJs_i[0] == $SJs_j[0];
+						my $expected_end = $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]};
+						my $is_expected_end_terminal = $SJs_i[-1] == $SJs_j[-1];
+						my $actual_start = $SJ_chain_read{$chain}[1];
+						my $actual_end = $SJ_chain_read{$chain}[2];
+						push @{$substring_nc{$chain}}, $nc_chain if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 					}
 				}
 				if (exists $substring_nc{$chain}) {
@@ -644,6 +725,7 @@ sub process_results_for_chr {
 		}
 
 		for my $cat ('nic', 'nnc') {
+			my $compat_class_string = uc($cat);
 			for my $chain (@{$cat_SJ_chains_sort{$cat}}) {
 				my $type;
 				if (exists $substring_nc{$chain}) {
@@ -670,37 +752,40 @@ sub process_results_for_chr {
 						if ($should_create_tsv_compt_handle){
 							for my $read_info_ref (@{$SJ_chain_read{$chain}[-1]}) {
 								my $read_ID = ${$read_info_ref}[0];
-								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNIC/NNC\t";
+								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\t$compat_class_string\t";
 								print $tsv_compt_handle "ESPRESSO:$chr:$n:$_," for @{$SJ_chain_cat{$cat}{$chain}[1]};
 								print $tsv_compt_handle "\n";
 							}
 						}
+						$summary_data{'num_reads_assigned'} += scalar @{$SJ_chain_read{$chain}[-1]};
 						printf $default_handle "read_count_summary\t$chr\t$cat\t$n:$chain\t$type\t%g\n", scalar(@{$SJ_chain_read{$chain}[-1]}) if $should_create_default_handle;
 					} else {
 						if ($should_create_tsv_compt_handle){
 							for my $read_info_ref (@{$SJ_chain_read{$chain}[-1]}) {
 								my $read_ID = ${$read_info_ref}[0];
-								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNIC/NNC\tNA\n";
+								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\t$compat_class_string\tNA\n";
 							}
 						}
+						$summary_data{'num_reads_not_assigned'} += scalar @{$SJ_chain_read{$chain}[-1]};
 						printf $default_handle "read_count_summary\t$chr\t$cat\t$n:$chain\tNA1\t%g\n", scalar(@{$SJ_chain_read{$chain}[-1]}) if $should_create_default_handle;
 					}
 				} elsif (exists $longest_nc_valid{$chain}) {
 					if ($should_create_tsv_compt_handle){
 						for my $read_info_ref (@{$SJ_chain_read{$chain}[-1]}){
 							my $read_ID = ${$read_info_ref}[0];
-							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNIC/NNC\tESPRESSO:$chr:$n:$longest_nc_valid{$chain}\n";
+							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\t$compat_class_string\tESPRESSO:$chr:$n:$longest_nc_valid{$chain}\n";
 						}
 					}
-					
+					$summary_data{'num_reads_assigned'} += scalar @{$SJ_chain_read{$chain}[-1]};
 					printf $default_handle "read_count_summary\t$chr\t$cat\t$n:$chain\titself\t%g\n", scalar(@{$SJ_chain_read{$chain}[-1]}) if $should_create_default_handle;
 				} else {
 					if ($should_create_tsv_compt_handle){
 						for my $read_info_ref (@{$SJ_chain_read{$chain}[-1]}) {
 							my $read_ID = ${$read_info_ref}[0];
-							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNIC/NNC\tNA\n";
+							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\t$compat_class_string\tNA\n";
 						}
 					}
+					$summary_data{'num_reads_not_assigned'} += scalar @{$SJ_chain_read{$chain}[-1]};
 					printf $default_handle "read_count_summary\t$chr\t$cat\t$n:$chain\tNA2\t%g\n", scalar(@{$SJ_chain_read{$chain}[-1]}) if $should_create_default_handle;
 					#print "$cat\t$chain\t",scalar(@{$SJ_chain_read{$chain}[-1]}),"\n";
 				}
@@ -708,83 +793,101 @@ sub process_results_for_chr {
 			}
 		}
 
-		
 		for my $ism_SJ_chain (@{$cat_SJ_chains_sort{'ism'}}) {
-			if (exists $longest_nc_valid{$ism_SJ_chain}){
-				if ($should_create_tsv_compt_handle){
-					for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}){
-						my $read_ID = ${$read_info_ref}[0];
-						print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNIC/NNC\t";
-						print $tsv_compt_handle "ESPRESSO:$chr:$n:$longest_nc_valid{$ism_SJ_chain},";
-						print $tsv_compt_handle "\n";
+			my @ism_SJ_order = split '_', $ism_SJ_chain;
+			if (exists $longest_nc_valid{$ism_SJ_chain}) {
+				# Reads for all chains have already been assigned to themselves in
+				# read_count_isoform ([0] and [1]).
+				# ISM chains have their individual read endpoints checked.
+				# The direct assignment count for longest novel ISM chains is updated here.
+				my $expected_start = $SJ_chain_read_exon_end{$ism_SJ_chain}{'start'}{$ism_SJ_order[0]};
+				my $is_expected_start_terminal = 1;
+				my $expected_end = $SJ_chain_read_exon_end{$ism_SJ_chain}{'end'}{$ism_SJ_order[-1]};
+				my $is_expected_end_terminal = 1;
+				for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}) {
+					my ($read_ID, $read_start, $read_end, $strand) = @{$read_info_ref};
+					my $sample = $read_info{$read_ID}{'sample'};
+					my $actual_start = $read_start;
+					my $actual_end = $read_end;
+					if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
+						if ($should_create_tsv_compt_handle) {
+							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$sample\tNIC\t";
+							print $tsv_compt_handle "ESPRESSO:$chr:$n:$longest_nc_valid{$ism_SJ_chain},";
+							print $tsv_compt_handle "\n";
+						}
+						$summary_data{'num_reads_assigned'} ++;
+					} else {
+						$read_count_isoform{$ism_SJ_chain}{$sample}[1] --;
+						if ($should_create_tsv_compt_handle) {
+							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$sample\tISM\t";
+							print $tsv_compt_handle "NA\n";
+						}
+						$summary_data{'num_reads_not_assigned'} ++;
 					}
 				}
 				printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\titself\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
 			} else {
 				if (!exists $substring_nc{$ism_SJ_chain}) {
-					my @SJs_i = split '_', $ism_SJ_chain;
 					while (my ($nc_chain, $nc_chain_ID) = each %longest_nc_valid) {
 						next unless exists ${$SJ_chain_read{$ism_SJ_chain}[-2]}{$nc_chain};
-						my $comp_result = &comp_SJ_chain($ism_SJ_chain, $nc_chain);
+						my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($ism_SJ_chain, $nc_chain);
 						if ($comp_result == 2) {
-							push @{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}, $nc_chain_ID if $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$ism_SJ_chain}[1] and $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$ism_SJ_chain}[2];
+							my @SJs_j = split '_', $nc_chain;
+							my $expected_start = $SJ_chain_read_exon_end{$nc_chain}{'start'}{$ism_SJ_order[0]};
+							my $is_expected_start_terminal = $ism_SJ_order[0] == $SJs_j[0];
+							my $expected_end = $SJ_chain_read_exon_end{$nc_chain}{'end'}{$ism_SJ_order[-1]};
+							my $is_expected_end_terminal = $ism_SJ_order[-1] == $SJs_j[-1];
+							my $actual_start = $SJ_chain_read{$ism_SJ_chain}[1];
+							my $actual_end = $SJ_chain_read{$ism_SJ_chain}[2];
+							push @{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}, $nc_chain_ID if &check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data);
 						}
 					}
 				}
-				
-				if (scalar(@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}) == 1) {
-					my @isoforms_only = @{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]};
-					my $isoform_fsm = $SJ_chain_cat{'ism'}{$ism_SJ_chain}[1][0];
-					my ($read_compatible_isoform_1);
-					if (exists $fsm_chain{$isoform_fsm}) {
-						for my $sample (@{$samples_sort_ref}) {
-							$read_count_isoform{$fsm_chain{$isoform_fsm}}{$sample}[1] += $read_count_isoform{$ism_SJ_chain}{$sample}[0];
-						}
-						$read_compatible_isoform_1 = $isoform_fsm;
-					} elsif ($isoform_fsm =~ /^\d+$/ and defined $nc_valid_longest[$isoform_fsm]){
-						for my $sample (@{$samples_sort_ref}) {
-							$read_count_isoform{$nc_valid_longest[$isoform_fsm]}{$sample}[1] += $read_count_isoform{$ism_SJ_chain}{$sample}[0];
-						}
-						$read_compatible_isoform_1 = "ESPRESSO:$chr:$n:$isoform_fsm";
-					} else {
-						die "don't know what fsm is for $ism_SJ_chain in group $n($group_start, $group_end)\t$isoform_fsm\n";
-					}
-					if ($should_create_tsv_compt_handle){
-						for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}){
-							my $read_ID = ${$read_info_ref}[0];
-							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t";
-							print $tsv_compt_handle "$read_compatible_isoform_1,\n";
-						}
-					}
-					printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tdirect\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
-				} elsif (scalar(@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}) > 1) {
-					my @ism_SJ_order = split '_', $ism_SJ_chain;
+				my $num_candidate_isoforms = scalar(@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]});
+				if ($num_candidate_isoforms >= 1) {
 					my @SJ_chain_pos = map {$all_SJ_group_sort[$_]} @ism_SJ_order;
 					my (%chains_string_freq);
-					for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}){
+					for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}) {
 						my ($read_ID, $read_start, $read_end, $strand) = @{$read_info_ref};
 						my $sample = $read_info{$read_ID}{'sample'};
 						my (%fsm_SJ_chain_right, %read_compatible_isoform);
-						for my $possible_isoform (@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}){
-							if (exists $multi_exon_isoform_end_ref->{$possible_isoform}){
+						for my $possible_isoform (@{$SJ_chain_cat{'ism'}{$ism_SJ_chain}[1]}) {
+							if (exists $multi_exon_isoform_end_ref->{$possible_isoform}) {
 								my $fsm_chain_from_isoform = $fsm_chain{$possible_isoform};
 								# Multiple isoforms could have the same chain.
 								if (!exists $fsm_SJ_chain_right{$fsm_chain_from_isoform}) {
 									$fsm_SJ_chain_right{$fsm_chain_from_isoform} = 0;
 								}
 								$read_compatible_isoform{$possible_isoform} = 0;
-								if( exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} and exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} and $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]} - $SJ_dist <= $read_start and $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]} + $SJ_dist >= $read_end ){
+								next unless exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]};
+								next unless exists $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]};
+								my $expected_first_start = $multi_exon_isoform_end_ref->{$possible_isoform}{'0'};
+								my $expected_last_end = $multi_exon_isoform_end_ref->{$possible_isoform}{'1'};
+								my $expected_start = $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[0]}[1]};
+								my $is_expected_start_terminal = $expected_start == $expected_first_start;
+								my $expected_end = $multi_exon_isoform_end_ref->{$possible_isoform}{$anno_SJ_ref->{$SJ_chain_pos[-1]}[2]};
+								my $is_expected_end_terminal = $expected_end == $expected_last_end;
+								my $actual_start = $read_start;
+								my $actual_end = $read_end;
+								if(&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 									$fsm_SJ_chain_right{$fsm_chain_from_isoform} ++;
 									$read_compatible_isoform{$possible_isoform} ++;
 								}
-							} elsif ($possible_isoform =~ /^\d+$/ and defined $nc_valid_longest[$possible_isoform]){
+							} elsif ($possible_isoform =~ /^\d+$/ and defined $nc_valid_longest[$possible_isoform]) {
 								my $novel_chain = $nc_valid_longest[$possible_isoform];
 								my $novel_name = "ESPRESSO:$chr:$n:$possible_isoform";
 								if (!exists $fsm_SJ_chain_right{$novel_chain}) {
 									$fsm_SJ_chain_right{$novel_chain} = 0;
 								}
 								$read_compatible_isoform{$novel_name} = 0;
-								if ($SJ_chain_read_exon_end{$novel_chain}{'start'}{$ism_SJ_order[0]} - $SJ_dist <= $read_start and $SJ_chain_read_exon_end{$novel_chain}{'end'}{$ism_SJ_order[-1]} + $SJ_dist >= $read_end) {
+								my @SJs_j = split '_', $novel_chain;
+								my $expected_start = $SJ_chain_read_exon_end{$novel_chain}{'start'}{$ism_SJ_order[0]};
+								my $is_expected_start_terminal = $ism_SJ_order[0] == $SJs_j[0];
+								my $expected_end = $SJ_chain_read_exon_end{$novel_chain}{'end'}{$ism_SJ_order[-1]};
+								my $is_expected_end_terminal = $ism_SJ_order[-1] == $SJs_j[-1];
+								my $actual_start = $read_start;
+								my $actual_end = $read_end;
+								if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 									$fsm_SJ_chain_right{$novel_chain} ++;
 									$read_compatible_isoform{$novel_name} ++;
 								}
@@ -794,21 +897,29 @@ sub process_results_for_chr {
 						}
 						my @valid_SJ_chain = grep {$fsm_SJ_chain_right{$_}>0} keys %fsm_SJ_chain_right;
 						if (scalar(@valid_SJ_chain)>=1) {
-							my @sort_chains = sort {$a cmp $b} @valid_SJ_chain;
-							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t" if $should_create_tsv_compt_handle;
-							my @valid_isoforms = grep {$read_compatible_isoform{$_}>0} keys %read_compatible_isoform;
+							# If there was only 1 isoform and it passed the read endpoint check then
+							# it can be direct assigned.
+							if ($num_candidate_isoforms == 1) {
+								my $compat_chain = $valid_SJ_chain[0];
+								$read_count_isoform{$compat_chain}{$sample}[1] ++;
+							} else {
+								my @sort_chains = sort {$a cmp $b} @valid_SJ_chain;
+								my $chains_compt_read_string = join(':', @sort_chains);
+								$chains_string_freq{$chains_compt_read_string}{$sample} ++;
+							}
 							if ($should_create_tsv_compt_handle) {
+								my @valid_isoforms = grep {$read_compatible_isoform{$_}>0} keys %read_compatible_isoform;
+								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t";
 								print $tsv_compt_handle "$_," for @valid_isoforms;
 								print $tsv_compt_handle "\n";
 							}
-
-							my $chains_compt_read_string = join(':', @sort_chains);
-							$chains_string_freq{$chains_compt_read_string}{$sample} ++;
+							$summary_data{'num_reads_assigned'} ++;
 						} else {
 							if ($should_create_tsv_compt_handle) {
 								print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t";
 								print $tsv_compt_handle "NA\n";
 							}
+							$summary_data{'num_reads_not_assigned'} ++;
 						}
 					}
 					while (my ($chains_string, $sample_ref) = each %chains_string_freq) {
@@ -816,29 +927,41 @@ sub process_results_for_chr {
 							push @{$ism_mt1_chain_count{$ism_SJ_chain}{$sample}}, [$chains_string, $count];
 						}
 					}
-					printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tEM\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
+					if ($num_candidate_isoforms == 1) {
+						printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tdirect\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
+					} else {
+						printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tEM\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
+					}
 				} else {
-					if ($should_create_tsv_compt_handle){
-						for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}){
+					if ($should_create_tsv_compt_handle) {
+						for my $read_info_ref (@{$SJ_chain_read{$ism_SJ_chain}[-1]}) {
 							my $read_ID = ${$read_info_ref}[0];
 							print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tISM\t";
 							print $tsv_compt_handle "NA\n";
 						}
 					}
-					
+					$summary_data{'num_reads_not_assigned'} += scalar @{$SJ_chain_read{$ism_SJ_chain}[-1]};
 					printf $default_handle "read_count_summary\t$chr\tism\t$n:$ism_SJ_chain\tNA0\t%g\n", scalar(@{$SJ_chain_read{$ism_SJ_chain}[-1]}) if $should_create_default_handle;
 				}
 			}
 		}
-		
+
 		for my $filtered_SJ_chain (@{$cat_SJ_chains_sort{'filtered'}}) {
 			my @SJs_i = split '_', $filtered_SJ_chain;
 			my (@SJ_chains, @isoforms_compatible);
 			for my $fsm_SJ_chain (@{$cat_SJ_chains_sort{'fsm'}}) {
 				next unless exists ${$SJ_chain_read{$filtered_SJ_chain}[-2]}{$fsm_SJ_chain};
-				my $comp_result = &comp_SJ_chain($filtered_SJ_chain, $fsm_SJ_chain);
+				my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($filtered_SJ_chain, $fsm_SJ_chain);
 				if ($comp_result == 3) {
-					if ($SJ_chain_read_exon_end{$fsm_SJ_chain}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$filtered_SJ_chain}[1] and $SJ_chain_read_exon_end{$fsm_SJ_chain}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$filtered_SJ_chain}[2]){
+					my @SJs_j = split '_', $fsm_SJ_chain;
+					my $expected_start = $SJ_chain_read_exon_end{$fsm_SJ_chain}{'start'}{$SJs_j[$num_leading_unpaired_SJs]};
+					my $is_expected_start_terminal = $num_leading_unpaired_SJs == 0;
+					my $final_paired_SJ_j = $num_leading_unpaired_SJs + (scalar @SJs_i) - 1;
+					my $expected_end = $SJ_chain_read_exon_end{$fsm_SJ_chain}{'end'}{$SJs_j[$final_paired_SJ_j]};
+					my $is_expected_end_terminal = $final_paired_SJ_j == $#SJs_j;
+					my $actual_start = $SJ_chain_read{$filtered_SJ_chain}[1];
+					my $actual_end = $SJ_chain_read{$filtered_SJ_chain}[2];
+					if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 						push @SJ_chains, $fsm_SJ_chain;
 						my @isoforms = @{$SJ_chain_cat{'fsm'}{$fsm_SJ_chain}[1]};
 						push @isoforms_compatible, @isoforms;;
@@ -847,9 +970,17 @@ sub process_results_for_chr {
 			}
 			while (my ($nc_chain, $nc_chain_ID) = each %longest_nc_valid) {
 				next unless exists ${$SJ_chain_read{$filtered_SJ_chain}[-2]}{$nc_chain};
-				my $comp_result = &comp_SJ_chain($filtered_SJ_chain, $nc_chain);
+				my ($comp_result, $num_leading_unpaired_SJs) = &comp_SJ_chain($filtered_SJ_chain, $nc_chain);
 				if ($comp_result == 3) {
-					if ($SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_i[0]} - $SJ_dist <= $SJ_chain_read{$filtered_SJ_chain}[1] and $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_i[-1]} + $SJ_dist >= $SJ_chain_read{$filtered_SJ_chain}[2]){
+					my @SJs_j = split '_', $nc_chain;
+					my $expected_start = $SJ_chain_read_exon_end{$nc_chain}{'start'}{$SJs_j[$num_leading_unpaired_SJs]};
+					my $is_expected_start_terminal = $num_leading_unpaired_SJs == 0;
+					my $final_paired_SJ_j = $num_leading_unpaired_SJs + (scalar @SJs_i) - 1;
+					my $expected_end = $SJ_chain_read_exon_end{$nc_chain}{'end'}{$SJs_j[$final_paired_SJ_j]};
+					my $is_expected_end_terminal = $final_paired_SJ_j == $#SJs_j;
+					my $actual_start = $SJ_chain_read{$filtered_SJ_chain}[1];
+					my $actual_end = $SJ_chain_read{$filtered_SJ_chain}[2];
+					if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 						push @SJ_chains, $nc_chain;
 						push @isoforms_compatible, "ESPRESSO:$chr:$n:$longest_nc_valid{$nc_chain}";
 					}
@@ -868,12 +999,14 @@ sub process_results_for_chr {
 						print $tsv_compt_handle "\n";
 					}
 				}
+				$summary_data{'num_reads_assigned'} += scalar @{$SJ_chain_read{$filtered_SJ_chain}[-1]};
 				printf $default_handle "read_count_summary\t$chr\tfiltered\t$n:$filtered_SJ_chain\tEM\t%g\n", scalar(@{$SJ_chain_read{$filtered_SJ_chain}[-1]}) if $should_create_default_handle and @SJ_chains > 1;
 			} else {
 				for my $read_info_ref (@{$SJ_chain_read{$filtered_SJ_chain}[-1]}) {
 					my $read_ID = ${$read_info_ref}[0];
 					print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tNCD\tNA\n" if $should_create_tsv_compt_handle;
 				}
+				$summary_data{'num_reads_not_assigned'} += scalar @{$SJ_chain_read{$filtered_SJ_chain}[-1]};
 				printf $default_handle "read_count_summary\t$chr\tfiltered\t$n:$filtered_SJ_chain\tNA\t%g\n", scalar(@{$SJ_chain_read{$filtered_SJ_chain}[-1]}) if $should_create_default_handle;
 			}
 		}
@@ -1130,14 +1263,18 @@ sub process_results_for_chr {
 				for my $sample (@{$samples_sort_ref}){
 					if ($total_perfect_match{$sample} > 0){
 						if ( exists $isoform_perfect_match{$isoform} and exists $isoform_perfect_match{$isoform}{$sample} ) {
-							$abu_output .= sprintf ("\t%.2f", $read_count_isoform{$fsm_SJ_chain}{$sample}[2]*@{$isoform_perfect_match{$isoform}{$sample}}/$total_perfect_match{$sample});
+							my $abu_amount = sprintf ("%.2f", $read_count_isoform{$fsm_SJ_chain}{$sample}[2]*@{$isoform_perfect_match{$isoform}{$sample}}/$total_perfect_match{$sample});
+							$abu_output .= "\t$abu_amount";
+							$summary_data{'total_fsm_abundance'} += $abu_amount;
 							$tag = 1;
 						} else {
 							$abu_output .= "\t0";
 						}
 					} else {
 						if ($read_count_isoform{$fsm_SJ_chain}{$sample}[2]>0) {
-							$abu_output .= sprintf ("\t%.2f", $read_count_isoform{$fsm_SJ_chain}{$sample}[2]/@{${$chain_info_ref}[-1]});
+							my $abu_amount = sprintf ("%.2f", $read_count_isoform{$fsm_SJ_chain}{$sample}[2]/@{${$chain_info_ref}[-1]});
+							$abu_output .= "\t$abu_amount";
+							$summary_data{'total_fsm_abundance'} += $abu_amount;
 							$tag = 1;
 						} else {
 							$abu_output .= "\t0";
@@ -1145,6 +1282,7 @@ sub process_results_for_chr {
 					}
 				}
 				if ($tag == 1){
+					$summary_data{'num_fsm_isoforms_detected'} ++;
 					print $abu_handle $abu_output."\n";
 					&gtf_output($gtf_handle, $chr, $isoform, $gene_ID, [$multi_exon_isoform_end_ref->{$isoform}{'0'},$multi_exon_isoform_end_ref->{$isoform}{'1'}], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
 				}
@@ -1158,9 +1296,20 @@ sub process_results_for_chr {
 					print $tsv_compt_handle "\n";
 				}
 			}
+			$summary_data{'num_reads_assigned'} += scalar @{$SJ_chain_read{$fsm_SJ_chain}[-1]};
 			printf $default_handle "read_count_summary\t$chr\tfsm\t$n:$fsm_SJ_chain\titself\t%g\n", scalar(@{$SJ_chain_read{$fsm_SJ_chain}[-1]}) if $should_create_default_handle;
 		}
 		while(my ($nc_SJ_chain, $nc_SJ_chain_ID) = each %longest_nc_valid){
+			# longest novel should be one of ism, nic, nnc
+			my $chain_cat = '';
+			if (exists $SJ_chain_cat{'ism'}{$nc_SJ_chain}) {
+				$chain_cat = 'novel_ism';
+			} elsif (exists $SJ_chain_cat{'nic'}{$nc_SJ_chain}) {
+				$chain_cat = 'nic';
+			} elsif (exists $SJ_chain_cat{'nnc'}{$nc_SJ_chain}) {
+				$chain_cat = 'nnc';
+			}
+
 			my $isSameStrand = $SJ_chain_read{$nc_SJ_chain}[3];
 			my @SJ_IDs = split '_', $nc_SJ_chain;
 			my @SJs = map {$all_SJ_group_sort[$_]} @SJ_IDs;
@@ -1204,9 +1353,13 @@ sub process_results_for_chr {
 				my $possible_genes_ID = join ',', @possible_genes_sort;
 				my $possible_isoform_name = join ',', @possible_isoform_names_sort;
 				print $abu_handle "$isoform_ID\t$possible_isoform_name\t$possible_genes_ID";
-
-				printf $abu_handle "\t%.2f", $read_count_isoform{$nc_SJ_chain}{$_}[2] for @{$samples_sort_ref};
+				for my $sample (@{$samples_sort_ref}) {
+					my $abu_amount = sprintf ("%.2f", $read_count_isoform{$nc_SJ_chain}{$sample}[2]);
+					print $abu_handle "\t$abu_amount";
+					$summary_data{"total_$chain_cat"."_abundance"} += $abu_amount;
+				}
 				print $abu_handle "\n";
+				$summary_data{"num_$chain_cat"."_isoforms_detected"} ++;
 				# gtf_output expects a 0-based start coordinate
 				my $zero_based_start = $SJ_chain_read{$nc_SJ_chain}[1] - 1;
 				&gtf_output($gtf_handle, $chr, $isoform_ID, $possible_genes_ID, [$zero_based_start,$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'annotated_isoform');
@@ -1232,9 +1385,14 @@ sub process_results_for_chr {
 					print $abu_handle "\tNA";
 					$possible_genes_ID = "NA";
 				}
-				
-				printf $abu_handle "\t%.2f", $read_count_isoform{$nc_SJ_chain}{$_}[2] for @{$samples_sort_ref};
+
+				for my $sample (@{$samples_sort_ref}) {
+					my $abu_amount = sprintf ("%.2f", $read_count_isoform{$nc_SJ_chain}{$sample}[2]);
+					print $abu_handle "\t$abu_amount";
+					$summary_data{"total_$chain_cat"."_abundance"} += $abu_amount;
+				}
 				print $abu_handle "\n";
+				$summary_data{"num_$chain_cat"."_isoforms_detected"} ++;
 				# gtf_output expects a 0-based start coordinate
 				my $zero_based_start = $SJ_chain_read{$nc_SJ_chain}[1] - 1;
 				&gtf_output($gtf_handle, $chr, "$isoform_ID", $possible_genes_ID, [$zero_based_start,$SJ_chain_read{$nc_SJ_chain}[2]], \@SJs, $strand_symbol_ref->{$isSameStrand}, 'novel_isoform');
@@ -1264,7 +1422,13 @@ sub process_results_for_chr {
 			my $sample = $read_info{$read_ID}{'sample'};
 			if (exists $read_info{$read_ID}{'start'} and exists $read_info{$read_ID}{'end'}) {
 				for my $single_exon_isoform(@single_exon_isoforms_group_sort){
-					if ( $single_exon_isoform_end_ref->{$single_exon_isoform}{'0'}-$SJ_dist<=$read_info{$read_ID}{'start'} and abs($single_exon_isoform_end_ref->{$single_exon_isoform}{'1'}+$SJ_dist >=$read_info{$read_ID}{'end'}) ){
+					my $expected_start = $single_exon_isoform_end_ref->{$single_exon_isoform}{'0'};
+					my $is_expected_start_terminal = 1;
+					my $expected_end = $single_exon_isoform_end_ref->{$single_exon_isoform}{'1'};
+					my $is_expected_end_terminal = 1;
+					my $actual_start = $read_info{$read_ID}{'start'};
+					my $actual_end = $read_info{$read_ID}{'end'};
+					if (&check_endpoint_compatibility($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, \%summary_data)) {
 						push @{$possible_single_exon_isoform{$read_ID}}, $single_exon_isoform;
 					}
 				}
@@ -1277,10 +1441,11 @@ sub process_results_for_chr {
 					print $tsv_compt_handle "$single_exon_isoform," if $should_create_tsv_compt_handle;
 				}
 				print $tsv_compt_handle "\n" if $should_create_tsv_compt_handle;
+				$summary_data{'num_reads_assigned'} ++;
 			} else {
 				$total_count2 ++;
 				print $tsv_compt_handle "$read_info{$read_ID}{'ori_ID'}\t$read_info{$read_ID}{'sample'}\tsingle-exon\tNA\n" if $should_create_tsv_compt_handle;
-				
+				$summary_data{'num_reads_not_assigned'} ++;
 			}
 		}
 		if ($should_create_default_handle) {
@@ -1367,8 +1532,13 @@ sub process_results_for_chr {
 	while (my ($single_exon_isoform, $sample_ref) = each %single_exon_isoform_total){
 		my $gene_ID = $isoform_info_ref->{$single_exon_isoform}[0];
 		print $abu_handle "$single_exon_isoform\t$isoform_info_ref->{$single_exon_isoform}[-1]\t$gene_ID";
-		printf $abu_handle "\t%.2f", ${$sample_ref}{$_} for @{$samples_sort_ref};
+		for my $sample (@{$samples_sort_ref}) {
+			my $abu_amount = sprintf ("%.2f", ${$sample_ref}{$sample});
+			printf $abu_handle "\t$abu_amount";
+			$summary_data{'total_single_exon_abundance'} += $abu_amount;
+		}
 		print $abu_handle "\n";
+		$summary_data{'num_single_exon_isoforms_detected'} ++;
 		&gtf_output($gtf_handle, $chr, $single_exon_isoform, $gene_ID, [$single_exon_isoform_end_ref->{$single_exon_isoform}{'0'},$single_exon_isoform_end_ref->{$single_exon_isoform}{'1'}], [], $single_exon_isoform_end_ref->{$single_exon_isoform}{'strand'}, 'annotated_isoform');
 
 	}
@@ -1401,6 +1571,9 @@ sub process_results_for_chr {
 	close $tsv_compt_handle if $should_create_tsv_compt_handle;
 	close $abu_handle;
 	close $gtf_handle;
+
+	my $summary_path = &summary_path_for_chr($chr, $out_dir);
+	store \%summary_data, $summary_path;
 }
 
 sub gtf_output {
@@ -1522,35 +1695,42 @@ sub compare_SJ_chains_as_numeric_tuples {
 	return $len_1 < $len_2 ? -1 : 1;
 }
 
+# returns 2 values:
+# The 1st indicates the comparison result.
+# The 2nd is $num_leading_unpaired_SJs which is the number of SJs from
+# the long chain which are not paired to an SJ in the short chain (x or non-x).
 sub comp_SJ_chain{
 	my ($SJ_chain_short, $SJ_chain_long) = @_;
+	my $num_leading_unpaired_SJs = 0;
 	my @SJs_short = split '_', $SJ_chain_short;
 	my @SJs_long = split '_', $SJ_chain_long;
 	if (@SJs_short > @SJs_long or @SJs_short == 0 or @SJs_long == 0) {
-		return 0;
+		return (0, $num_leading_unpaired_SJs);
 	}
 	my @non_x_SJ_IDs = grep {$SJs_short[$_] ne 'x'} (0 .. $#SJs_short);
-	my ($matched_1st_non_x_SJ_ID, $match_SJ_num);
 
+	my ($matched_1st_non_x_SJ_ID, $match_SJ_num);
 	for my $XJ_ID_long ($non_x_SJ_IDs[0] .. $#SJs_long) {
 		if (defined $matched_1st_non_x_SJ_ID and defined $SJs_short[$XJ_ID_long-$matched_1st_non_x_SJ_ID+$non_x_SJ_IDs[0]] and $SJs_short[$XJ_ID_long-$matched_1st_non_x_SJ_ID+$non_x_SJ_IDs[0]] eq $SJs_long[$XJ_ID_long]) {
 			$match_SJ_num ++;
 		} elsif ($SJs_short[$non_x_SJ_IDs[0]] eq $SJs_long[$XJ_ID_long]) {
 			$matched_1st_non_x_SJ_ID = $XJ_ID_long;
 			if ($#SJs_long-$matched_1st_non_x_SJ_ID < $#SJs_short-$non_x_SJ_IDs[0]) {
-				return 0;
+				return (0, $num_leading_unpaired_SJs);
 			}
 			$match_SJ_num ++;
+		} elsif (!defined $matched_1st_non_x_SJ_ID) {
+			$num_leading_unpaired_SJs ++;
 		}
 	}
 	if ($match_SJ_num == @SJs_long){
-		1;
+		return (1, $num_leading_unpaired_SJs);
 	} elsif ($match_SJ_num == @SJs_short){
-		2;
+		return (2, $num_leading_unpaired_SJs);
 	} elsif ($match_SJ_num == @non_x_SJ_IDs){
-		3;
+		return (3, $num_leading_unpaired_SJs);
 	} else {
-		0;
+		return (0, $num_leading_unpaired_SJs);
 	}
 }
 
@@ -1559,9 +1739,43 @@ sub comp_minimap_reference_SJ{
 	my @ref_SJ_sort = sort {${$ref_SJ_ref}{$a}[0] <=> ${$ref_SJ_ref}{$b}[0] or ${$ref_SJ_ref}{$a}[1] <=> ${$ref_SJ_ref}{$b}[1]} keys %{$ref_SJ_ref};
 	my @minimap_SJ_sort = sort {${$minimap_SJ_ref}{$a}[1] <=> ${$minimap_SJ_ref}{$b}[1] or ${$minimap_SJ_ref}{$a}[2] <=> ${$minimap_SJ_ref}{$b}[2]} keys %{$minimap_SJ_ref};
 	my ($ref_SJ_sort_string, $minimap_SJ_sort_string) = (join('_',@ref_SJ_sort), join('_',@minimap_SJ_sort) );
-	my $result = &comp_SJ_chain($minimap_SJ_sort_string, $ref_SJ_sort_string);
+	my ($result, $num_leading_unpaired_SJs) = &comp_SJ_chain($minimap_SJ_sort_string, $ref_SJ_sort_string);
 	print $default_handle "$minimap_SJ_sort_string\t$ref_SJ_sort_string\t$result\n" if defined $default_handle;
 	return $result;
+}
+
+sub check_fsm_perfect_match_endpoints {
+	my ($expected_start, $expected_end, $actual_start, $actual_end, $SJ_dist) = @_;
+	return (abs($actual_start - $expected_start) <= $SJ_dist and abs($actual_end - $expected_end) <= $SJ_dist);
+}
+
+sub check_endpoint_compatibility {
+	my ($expected_start, $is_expected_start_terminal, $expected_end, $is_expected_end_terminal, $actual_start, $actual_end, $SJ_dist, $internal_boundary_limit, $allow_longer_terminal_exons, $summary_data_ref) = @_;
+
+	my $is_ok = 1;
+	my $amount_past_start = $expected_start - $actual_start;
+	if ($is_expected_start_terminal) {
+		if ((!$allow_longer_terminal_exons) and ($amount_past_start > $SJ_dist)) {
+			$summary_data_ref->{'num_terminal_exon_boundary_check_fails'} ++;
+			$is_ok = 0;
+		}
+	} elsif ($amount_past_start > $internal_boundary_limit) {
+		$summary_data_ref->{'num_internal_exon_boundary_check_fails'} ++;
+		$is_ok = 0;
+	}
+
+	my $amount_past_end = $actual_end - $expected_end;
+	if ($is_expected_end_terminal) {
+		if ((!$allow_longer_terminal_exons) and ($amount_past_end > $SJ_dist)) {
+			$summary_data_ref->{'num_terminal_exon_boundary_check_fails'} ++;
+			$is_ok = 0;
+		}
+	} elsif ($amount_past_end > $internal_boundary_limit) {
+		$summary_data_ref->{'num_internal_exon_boundary_check_fails'} ++;
+		$is_ok = 0
+	}
+
+	return $is_ok;
 }
 
 sub gtf_path_for_chr {
@@ -1582,6 +1796,11 @@ sub tsv_compt_path_for_chr {
 sub default_path_for_chr {
 	my ($chr, $out_dir) = @_;
 	return $out_dir."/$chr.default_output.tmp";
+}
+
+sub summary_path_for_chr {
+	my ($chr, $out_dir) = @_;
+	return $out_dir."/$chr.espresso_q_summary.tmp";
 }
 
 # package must return true

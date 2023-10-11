@@ -11,10 +11,10 @@ use ESPRESSO_Version;
 
 my $version_number = ESPRESSO_Version::get_version_number();
 my $version_string = "S_$version_number";
-my ($help, $sam, $in, $list_samples, $fa, $anno, $out, $SJ_bed, $read_num_cutoff, $read_ratio_cutoff, $group_extra_range, $num_thread, $mapq_cutoff, $keep_tmp, 
-	$cont_del_max, $chrM, $inserted_cont_cutoff, $SJFS_dist, $SJFS_dist_add);
+my ($help, $sam, $in, $list_samples, $fa, $anno, $out, $SJ_bed, $read_num_cutoff, $read_ratio_cutoff, $group_extra_range, $num_thread, $mapq_cutoff, $keep_tmp,
+	$cont_del_max, $chrM, $inserted_cont_cutoff, $SJFS_dist, $SJFS_dist_add, $sort_buffer_size);
 
-
+my $arguments_before_parsing = "@ARGV";
 Getopt::Long::GetOptions (
 
 	'list_samples|L=s'			=>	\$list_samples,
@@ -37,7 +37,8 @@ Getopt::Long::GetOptions (
 
 	'inserted_cont_cutoff=i'	=>	\$inserted_cont_cutoff,
 	'SJFS_dist=i'				=>	\$SJFS_dist,
-	'SJFS_dist_add=i'			=>	\$SJFS_dist_add
+	'SJFS_dist_add=i'			=>	\$SJFS_dist_add,
+	'sort_buffer_size=s'	=>	\$sort_buffer_size
 
 );
 
@@ -89,6 +90,8 @@ Arguments:
           thread number (default: minimum of 5 and sam file number)  
     -Q, --mapq_cutoff
           min mapping quality for processing (default: 1)
+    --sort_buffer_size
+          memory buffer size for running 'sort' commands (default: 2G)
 
 ";
 } elsif ( !defined($list_samples) or !defined($fa) ) {
@@ -117,6 +120,12 @@ Arguments:
 	$chrM = 'chrM' if !defined $chrM;
 	$cont_del_max = 50 if !defined $cont_del_max;
 
+	if (defined $sort_buffer_size) {
+		$sort_buffer_size = "--buffer-size=$sort_buffer_size";
+	} else {
+		$sort_buffer_size = "--buffer-size=2G";
+	}
+
 	my @worker_threads;
 	my @thread_input_queues;
 	my @thread_output_queues;
@@ -134,6 +143,12 @@ Arguments:
 		push @warn_reason, " Work directory $out does not exist. Make it by myself\n";
 		mkdir $out or die "cannot mkdir $out: $!";
 	}
+
+	# The summary file will be written as a final step
+	my $summary_path = "$out/espresso_s_summary.txt";
+	my %summary_data = ();
+	&initialize_summary_data(\%summary_data);
+	$summary_data{'perl_command'} = "$^X " . __FILE__ . " $arguments_before_parsing";
 
 	my $samtools_version_error = ESPRESSO_Version::check_samtools_version();
 	if ($samtools_version_error ne '') {
@@ -167,7 +182,7 @@ Arguments:
 	}
 	close LIST;
 
-	printf  '['.scalar(localtime)."] Calculating how to assign %g files into %g threads\n", scalar(keys %sam_size), $num_thread if scalar(keys %sam_size) > 1;
+	print_with_timestamp(sprintf("Calculating how to assign %g files into %g threads", scalar(keys %sam_size), $num_thread)) if scalar(keys %sam_size) > 1;
 	$num_thread = &min(scalar(keys %sam_size), $num_thread);
 	$sam_distr_ref = &thread_distribution( $num_thread, \%sam_size );
 
@@ -217,7 +232,7 @@ Arguments:
 	my %chr_seq_len;
 	my $current_chr;
 
-	print  '[', scalar(localtime), "] Loading reference\n";
+	print_with_timestamp("Loading reference");
 	open FA, "<", $fa or die "cannot open $fa: $!";
 	while (<FA>) {
 		s/\r\n//;
@@ -225,17 +240,23 @@ Arguments:
 		if (/^>/) {
 			my $info = substr($_, 1, length($_)-1);
 			($current_chr, undef) = split /\s+/, $info;
-		} else {
+		} elsif (defined $current_chr) {
 			$chr_seq{$current_chr} .= uc($_);
 			$chr_seq_len{$current_chr} += length($_);
 		}
 	}
 	close FA;
+	my $num_chr_seqs = scalar(keys %chr_seq);
+	if ($num_chr_seqs == 0) {
+		die "No sequence information found in $fa";
+	}
+	# This will be updated later if $anno is read
+	$summary_data{'num_chrs_only_in_fa'} = $num_chr_seqs;
 
 	#open READ_SUMM, ">", $out."/read_summary.txt" or die "cannot write $out/read_summary.txt: $!";
 
 	if (defined $SJ_bed) {
-		print  '[', scalar(localtime), "] Checking custom splice junction\n";
+		print_with_timestamp("Checking custom splice junction");
 		open BED, "<", $SJ_bed or die "cannot open $SJ_bed: $!";
 		while(<BED>) {
 			chomp;
@@ -291,9 +312,9 @@ Arguments:
 		}
 	}
 
-	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads);
+	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads, \%summary_data);
 
-	print  '['.scalar(localtime)."] Re-cluster all reads\n";
+	print_with_timestamp("Re-cluster all reads");
 
 	my (%SJ_all_info, %SJ_group);
 	my (@group_sort_update, @group_all_info, %chr_group, %group_sep_in_all);
@@ -347,8 +368,8 @@ Arguments:
 		}
 		
 	}
+	$summary_data{'number_of_read_groups'} = scalar @group_sort_update;
 
-	
 	for my $sam_file (@sam_sort) {
 		my $num = $file_ID{$sam_file};
 
@@ -375,8 +396,8 @@ Arguments:
 	my (%anno_SJ);
 
 	if (defined $anno) {
-		print  '[', scalar(localtime), "] Loading annotation\n";
-		my (%anno_exons, %isoform_info);
+		print_with_timestamp("Loading annotation");
+		my (%anno_exons, %isoform_info, %anno_chr_names);
 		open ANNO, "<", $anno or die "cannot open $anno: $!";
 		while(<ANNO>) {
 			chomp;
@@ -396,8 +417,33 @@ Arguments:
 			}
 			$isoform_info{$current_isoform} = [$current_gene, $line[6], $line[0]];
 			$anno_exons{$current_isoform}{$line[3]-1} = $line[4];
+			$anno_chr_names{$line[0]} = 1;
 		}
 		close ANNO;
+		my $num_annotated_isoforms = scalar(keys %isoform_info);
+		if ($num_annotated_isoforms == 0) {
+			die "No isoforms found in $anno";
+		}
+		$summary_data{'num_annotated_isoforms'} = $num_annotated_isoforms;
+
+		my $num_chrs_only_in_anno = 0;
+		my $num_chrs_only_in_fa = 0;
+		my $num_chrs_in_anno_and_fa = 0;
+		for my $chr (keys %chr_seq) {
+			if (exists $anno_chr_names{$chr}) {
+				$num_chrs_in_anno_and_fa ++;
+			} else {
+				$num_chrs_only_in_fa ++;
+			}
+		}
+		$num_chrs_only_in_anno = scalar(keys %anno_chr_names) - $num_chrs_in_anno_and_fa;
+
+		if ($num_chrs_in_anno_and_fa == 0) {
+			die "No overlap in chromosome names in $anno and $fa";
+		}
+		$summary_data{'num_chrs_only_in_anno'} = $num_chrs_only_in_anno;
+		$summary_data{'num_chrs_only_in_fa'} = $num_chrs_only_in_fa;
+		$summary_data{'num_chrs_in_anno_and_fa'} = $num_chrs_in_anno_and_fa;
 
 		while (my ($isoform, $exon_start_ref) = each %anno_exons) {
 			my @exon_start_sort = sort {$a <=> $b} keys %{$exon_start_ref};
@@ -413,7 +459,7 @@ Arguments:
 		}
 	}
 	if (defined $SJ_bed) {
-		print  '[', scalar(localtime), "] Loading custom splice junction\n";
+		print_with_timestamp("Loading custom splice junction");
 		open BED, "<", $SJ_bed or die "cannot open $SJ_bed: $!";
 		while(<BED>) {
 			chomp;
@@ -423,10 +469,10 @@ Arguments:
 		}
 		close BED;
 	}
+	$summary_data{'num_annotated_splice_junctions'} += (scalar keys %{$anno_SJ{$_}}) for keys %anno_SJ;
 
-	print  '[', scalar(localtime), "] Summarizing annotated splice junctions for each read group\n";
+	print_with_timestamp("Summarizing annotated splice junctions for each read group");
 
-	
 	#my %SJ_updated_all;
  
  	open SJ_FA, ">", $out."/SJ_group_all.fa" or die "cannot write $out/SJ_group_all.fa: $!";
@@ -548,8 +594,10 @@ Arguments:
 				for my $SJ2 (@SJs_current_cluster) {
 					push @{$SJ_updated{$SJ2}}, $index_ori;
 					my ($SJ_start, $SJ_end, $notSameStrand_SJ, $perfect_count, $all_count, $upstream_2nt, $downstream_2nt, $tag, $isPutative, $isAnno, $isHighConfidence, $cluster_index_ori) = @{$SJ_updated{$SJ2}};
+					$summary_data{'perfect_splice_junction_read_count'} += $perfect_count;
+					$summary_data{'total_splice_junction_read_count'} += $all_count;
 					if ( $tag == 2 or ($tag == 1 and $perfect_count >= $read_num_cutoff and $perfect_count >= $all_count*$read_ratio_cutoff) ) {
-						#$isHighConfidence = 1;
+						$summary_data{'num_high_confidence_splice_junctions'} ++;
 						$SJ_updated{$SJ2}[-2] = 1;
 						print SJ_FA ">$SJ2 SJclst:$index_ori: group:$n:\n";
 						print SJ_FA substr($chr_seq{$chr}, $SJ_start-$SJFS_dist-$SJFS_dist_add, $SJFS_dist+$SJFS_dist_add).substr($chr_seq{$chr}, $SJ_end, $SJFS_dist+$SJFS_dist_add)."\n";
@@ -605,14 +653,15 @@ Arguments:
 		}
 	}
 
-	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads);
+	&wait_for_threads_to_complete_work(scalar(@{$sam_distr_ref}), \@thread_input_queues, \@thread_output_queues, \@worker_threads, \%summary_data);
 
 	&cleanup_threads_and_exit_if_error(\@thread_input_queues, \@worker_threads);
+	&write_summary_file($summary_path, \%summary_data);
 
-	print  '[', scalar(localtime), "] ESPRESSO_S finished its work.\n";
+	print_with_timestamp("ESPRESSO_S finished its work.");
 
 	sub parallel_scan_prep {
-		my $main_input_ref = $_[0];
+		my ($main_input_ref, $summary_data_ref) = @_;
 		my $files_ref = thaw($main_input_ref->{'files_for_thread'});
 		my $all_input_ref = thaw($main_input_ref->{'inputs_for_all_threads'});
 		my $scan_num = $all_input_ref->{'scan_number'};
@@ -620,16 +669,16 @@ Arguments:
 		for my $file (@{$files_ref}) {
 			if ($file =~ /sam$/i) {
 				if ($scan_num == 1) {
-					&parallel_scan1([$file, 'sam', $all_input_ref]);
+					&parallel_scan1([$file, 'sam', $all_input_ref, $summary_data_ref]);
 				} else {
-					&parallel_scan2([$file, 'sam', $all_input_ref]);
+					&parallel_scan2([$file, 'sam', $all_input_ref, $summary_data_ref]);
 				}
 
 			} else {
 				if ($scan_num == 1) {
-					&parallel_scan1([$file, 'bam', $all_input_ref]);
+					&parallel_scan1([$file, 'bam', $all_input_ref, $summary_data_ref]);
 				} else {
-					&parallel_scan2([$file, 'bam', $all_input_ref]);
+					&parallel_scan2([$file, 'bam', $all_input_ref, $summary_data_ref]);
 				}
 
 			}
@@ -637,7 +686,7 @@ Arguments:
 	}
 
 	sub parallel_scan2 {
-		my ($file, $format, $input_ref) = @{$_[0]};
+		my ($file, $format, $input_ref, $summary_data_ref) = @{$_[0]};
 		my $file_ID_ref = $input_ref->{'file_ID'};
 		my $out = $input_ref->{'out'};
 		my $output_titles_ID_ref = $input_ref->{'output_titles_ID'};
@@ -648,9 +697,10 @@ Arguments:
 		my $num = $file_ID_ref->{$file};
 		print "$file\t$num\n";
 
-		my $exit_sort = system("sort -k 3,3 $out/$num/sam.list > $out/$num/sam.list2");
+		my $sort_command = "sort $sort_buffer_size -k 3,3 $out/$num/sam.list > $out/$num/sam.list2";
+		my $exit_sort = system($sort_command);
 		if ($exit_sort != 0) {
-			die "Failed to sort -k 3,3 $out/$num/sam.list. Exit code is $exit_sort";
+			die "Failed to $sort_command. Exit code is $exit_sort";
 		}
 
 		my %read_info;
@@ -780,6 +830,7 @@ Arguments:
 			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' and exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and defined $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3] ) {
 				my $read_seq = $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3];
 				if ($read_seq eq 'short') {
+					$summary_data_ref->{'num_reads_filtered_missing_full_sequence'} ++;
 					next;
 				}
 				$out_line .= "$read_seq\n";
@@ -787,6 +838,7 @@ Arguments:
 				$out_line .= "read_not_recorded\n";
 			}
 			print READ3 $out_line;
+			$summary_data_ref->{'number_of_reads_output'} ++;
 		}
 		close READ;
 		close READ3;
@@ -798,7 +850,7 @@ Arguments:
 	}
 
 	sub parallel_scan1 {
-		my ($file, $format, $input_ref) = @{$_[0]};
+		my ($file, $format, $input_ref, $summary_data_ref) = @{$_[0]};
 		my $file_ID_ref = $input_ref->{'file_ID'};
 		my $out = $input_ref->{'out'};
 		my $mapq_cutoff = $input_ref->{'mapq_cutoff'};
@@ -831,6 +883,7 @@ Arguments:
 		#print OUT "$output_title\n";
 
 		my (%SJ_read, %group_info, $pre_chr_end, @pre_group);
+		my %processed_chrs = ();
 		my $group_ID = 0;
 		my $line_num = 0;
 
@@ -848,262 +901,284 @@ Arguments:
 			if (defined $pinhead) {
 				my $notSameStrand = &ten2b($line[1], 5);
 				my $is_secondary = &ten2b($line[1], 9);
-
-				if ($line[4] >= $mapq_cutoff and $line[2] ne $chrM and !$is_secondary) {
-
-					my $msidn = &MSIDN_border($line[5], $cont_del_max);
-					
-					$line[11] =~ /NM:i:(\d+)/;
-					my $NM_num = $1;
-					if (!exists $chr_seq_len_ref->{$line[2]}) {
-						die "chr name ($line[2]) not recognized for $line[0] in $file";
-					}
-					if (${$msidn}{'max_I'} >= $inserted_cont_cutoff){
-						next;
-					} elsif ($line[3] - 1 + ${$msidn}{'mappedGenomeN'} > $chr_seq_len_ref->{$line[2]}) {
-						next;
-					}
-
-					my $end = $line[3]-1;
-					$end += $_ for @{${$msidn}{'exonIntronRef'}};
-					my $out;
-					$out .= "$line[0]\t${$msidn}{'read_length'}\t$line[1]\t$line[2]\t$line[3]\t$line[4]\t$end\t$notSameStrand\t${$msidn}{'mappedGenome'}\t";
-					$out .= "$_," for @{${$msidn}{'clip_ends'}};
-					$out .= "\t";
-
-					if ( !defined($pre_chr_end) or $line[2] ne ${$pre_chr_end}[0] or $line[3] > ${$pre_chr_end}[2]+$group_extra_range ){
-
-						if (defined($pre_chr_end)){
-							$group_ID ++;
-							$group_info{$group_ID} = [${$pre_chr_end}[0], ${$pre_chr_end}[1], ${$pre_chr_end}[2]];
-							print GROUP "$group_ID\t${$pre_chr_end}[0]\t${$pre_chr_end}[1]\t${$pre_chr_end}[2]\t";
-							for my $read(@pre_group) {
-								print GROUP "$read,";
-							}
-							print GROUP "\n";
-							if (scalar(keys %SJ_read)>0) {
-								while (my ($SJ, $SJ_info_ref) = each %SJ_read) {
-									print SJ "$group_ID\t$SJ\t${$SJ_info_ref}[0]\t${$SJ_info_ref}[1]\t${$SJ_info_ref}[2]\t"; #${$SJ_info_ref}[3]\t
-									my @perfect_reads = grep {${$SJ_info_ref}[-1]{$_}==1} keys %{${$SJ_info_ref}[-1]};
-									printf SJ "%g\t%g\t", scalar(@perfect_reads), scalar(keys %{${$SJ_info_ref}[-1]});
-									if (@perfect_reads>0){
-										print SJ "$_," for @perfect_reads;
-									} else {
-										print SJ "NA";
-									}
-									
-									print SJ "\t";
-									print SJ "$_," for keys %{${$SJ_info_ref}[-1]};
-									print SJ "\n";
-								}
-							}
-						}
-						%SJ_read = ();
-						@pre_group = ();
-						$pre_chr_end = [ $line[2], &max($line[3]-$group_extra_range, 0), &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]}) ];
-					} elsif (${$pre_chr_end}[2] < &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]})) {
-						${$pre_chr_end}[2] = &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]});
-					}
-					push @pre_group, $line[0];
-
-					print DEFAULT "$line[0]\n";
-
-					my ($msidn_all);
-
-					my (@IDS_SJ, @SJ_cor_seq);
-					my $exon_end = $line[3]-1;
-					my $exon_end2 = $line[3]-1;
-
-					my ($insert_num_total, $delete_num_total) = (${$msidn}{'insertion_nt'}, ${$msidn}{'deletion_nt'});
-					my ($subst_num_total) = $NM_num-$insert_num_total- $delete_num_total;
-					my ($insert_num_SJ, $delete_num_SJ, $substi_num_SJ) = (0,0,0);
-					my ($insert_num_bg, $delete_num_bg, $substi_num_bg, $total_bg) = (0,0,0,0);
-					for my $j (0 .. $#{${$msidn}{'ID_from_current_SJ'}}){
-						
-						my @next_exon_ID = @{${$msidn}{'ID_from_current_SJ'}[$j]};
-						my @next_exon_M = @{${$msidn}{'M_from_current_SJ'}[$j]};
-
-						for my $ID_info(@next_exon_ID) {
-							if (${$ID_info}[1] > $SJFS_dist and ${$ID_info}[2] > $SJFS_dist) {
-								if (${$ID_info}[0] > 0) {
-									$insert_num_bg += ${$ID_info}[0];
-								} else {
-									$delete_num_bg -= ${$ID_info}[0];
-								}
-								$total_bg += abs(${$ID_info}[0]);
-							}
-						}
-						if ($j >= 1){
-							$exon_end2 += ${$msidn}{'exonIntronRef'}[($j-1)*2];
-							$exon_end2 += ${$msidn}{'exonIntronRef'}[($j-1)*2+1];
-						}
-						print DEFAULT "(out)SJ:$j\t$exon_end2:";	
-						for my $M_info(@next_exon_M) {
-							if (${$M_info}[1]+${$M_info}[0] > $SJFS_dist and ${$M_info}[2]+${$M_info}[0] > $SJFS_dist) {
-								print DEFAULT "\t";
-								print DEFAULT "$_;" for @{$M_info};
-								my ($seq_ref, $seq_read);
-								my $substr_current_num = 0;
-								my $substr_length = ${$M_info}[0];
-								if (${$M_info}[1] < $SJFS_dist){
-									$substr_length -= $SJFS_dist-${$M_info}[1];
-								}
-
-								if (${$M_info}[2] < $SJFS_dist) {
-									$substr_length -= $SJFS_dist-${$M_info}[2];
-									if ($substr_length > 0) {
-										$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2+$SJFS_dist, $substr_length);
-										$seq_read = substr($line[9], ${$M_info}[3]+($SJFS_dist-${$M_info}[2]), $substr_length);
-									} else {
-										print DEFAULT "\tNA";
-										next;
-									}
-									
-									
-								} else {
-									if ($substr_length > 0) {
-										$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2 + ${$M_info}[2], $substr_length);
-										$seq_read = substr($line[9], ${$M_info}[3], $substr_length);
-									} else {
-										print DEFAULT "\tNA";
-										next;
-									}
-									
-								}
-
-								$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
-								$substi_num_bg += $substr_current_num;
-								$total_bg += $substr_length;
-								print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
-							}
-						}
-						print DEFAULT "\n";
-						next if $j == 0;
-
-						$exon_end += ${$msidn}{'exonIntronRef'}[($j-1)*2];
-						print DEFAULT "SJ:$j\t$exon_end:";			
-						my @pre_exon_ID = @{${$msidn}{'ID_from_current_SJ'}[$j-1]};
-						my @pre_exon_M = @{${$msidn}{'M_from_current_SJ'}[$j-1]};
-						my ($insert_num, $deletion_num, $subst_num) = (0,0,0);
-						my $substr_current_num = 0;
-						for my $ID_info(@pre_exon_ID) {
-							if (${$ID_info}[1] < $SJFS_dist) {
-								if (${$ID_info}[0] > 0) {
-									$insert_num += ${$ID_info}[0];
-								} elsif (${$ID_info}[1] - ${$ID_info}[0] > $SJFS_dist) {
-									$deletion_num += $SJFS_dist-${$ID_info}[1];
-								} else {
-									$deletion_num -= ${$ID_info}[0];
-								}
-							}
-						}
-						for my $M_info(@pre_exon_M) {
-							if (${$M_info}[1] < $SJFS_dist) {
-								print DEFAULT "\t";
-								print DEFAULT "$_;" for @{$M_info};
-								my ($seq_ref, $seq_read);
-								my $substr_current_num = 0;
-								if (${$M_info}[1] + ${$M_info}[0] > $SJFS_dist) {
-									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end-$SJFS_dist, $SJFS_dist-${$M_info}[1]);
-									$seq_read = substr($line[9], ${$M_info}[3]+${$M_info}[0]-($SJFS_dist-${$M_info}[1]), $SJFS_dist-${$M_info}[1]);
-									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
-								} else {
-									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end - ${$M_info}[1]-${$M_info}[0], ${$M_info}[0]);
-									$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
-									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
-								}
-								$subst_num += $substr_current_num;
-								print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
-							}
-						}
-						for my $ID_info(@next_exon_ID) {
-							if (${$ID_info}[2] < $SJFS_dist) {
-								if (${$ID_info}[0] > 0) {
-									$insert_num += ${$ID_info}[0];
-								} elsif (${$ID_info}[2] - ${$ID_info}[0] > $SJFS_dist) {
-									$deletion_num += $SJFS_dist-${$ID_info}[2];
-								} else {
-									$deletion_num -= ${$ID_info}[0];
-								}
-							}
-						}
-
-						my $SJ = $line[2].$sep_SJ.$exon_end.$sep_SJ;
-						$exon_end += ${$msidn}{'exonIntronRef'}[($j-1)*2+1];
-						$SJ .= $exon_end;
-
-						for my $M_info(@next_exon_M) {
-							if (${$M_info}[2] < $SJFS_dist) {
-								print DEFAULT "\t";
-								print DEFAULT "$_;" for @{$M_info};
-								my ($seq_ref, $seq_read);
-								my $substr_current_num = 0;
-								if (${$M_info}[2] + ${$M_info}[0] > $SJFS_dist) {
-									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], $SJFS_dist-${$M_info}[2]);
-									$seq_read = substr($line[9], ${$M_info}[3], $SJFS_dist-${$M_info}[2]);
-									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
-								} else {
-									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], ${$M_info}[0]);
-									$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
-									$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
-								}
-								$subst_num += $substr_current_num;
-								print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
-							}
-						}
-						print DEFAULT "\n";
-
-						push @SJ_cor_seq, [${$msidn}{'SJ_dist_read'}[$j-1], $SJ, 0];
-
-						push @IDS_SJ, [$insert_num, $deletion_num, $subst_num];
-
-						my $isPerfect = 0;
-						if ($insert_num+$deletion_num+$subst_num == 0) {
-							$isPerfect = 1;
-							#$SJ_read{$SJ}{$line[0]} = 1;
-						}
-						if (!exists $SJ_read{$SJ}) {
-							my @SJ_info = split $sep_SJ, $SJ;
-							$SJ_read{$SJ} = [$SJ_info[0], $SJ_info[1], $SJ_info[2], $SJ_info[2]-$SJ_info[1], {$line[0] => $isPerfect}]; #$SJ_info[3], 
-						} elsif ($isPerfect == 1 or !exists $SJ_read{$SJ}[-1]{$line[0]}) {
-							$SJ_read{$SJ}[-1]{$line[0]} = $isPerfect;
-						}
-						$insert_num_SJ += $insert_num;
-						$delete_num_SJ += $deletion_num;
-						$substi_num_SJ += $subst_num;
-					}
-
-					$out .= "$_," for @{${$msidn}{'exonIntronRef'}};
-					$out .= "\t";
-
-					if (@IDS_SJ > 0) {
-						$out .= "${$_}[0];${$_}[1];${$_}[2]," for @IDS_SJ;
-					} else {
-						$out .= "NA";
-					}
-					
-					$out .= join '', ("\t", $NM_num, "\t", $insert_num_bg, "\t", $delete_num_bg, "\t", $substi_num_bg, "\t", $total_bg, "\t");
-
-					if (@SJ_cor_seq > 0) {
-						$out .= "${$_}[0];${$_}[1];${$_}[2]," for @SJ_cor_seq;
-					} else {
-						$out .= "NA";
-					}
-					my $tag_read_seq = 'OK';
-					if ( ${$msidn}{'read_length'} == length($line[9]) ){
-						if ($notSameStrand == 1) {
-							print OUT $group_ID+1,"\t$line_num\t$out\t",&comp_rev($line[9]),"\n";
-						} else {
-							print OUT $group_ID+1,"\t$line_num\t$out\t$line[9]\n";
-						}
-					} elsif ( ${$msidn}{'read_length'} > length($line[9]) ) {
-						print OUT $group_ID+1,"\t$line_num\t$out\tNA\n";
-						$tag_read_seq = 'short';
-					} else {
-						die "${$msidn}{'read_length'}:\t$_\n";
-					}
-					#push @{$read_info{$line[0]}}, [${$msidn}{'read_length'}, ${$msidn}{'mappedGenome'}, $line[4], $line_num, $tag_read_seq];
+				if ($line[2] eq $chrM) {
+					$summary_data_ref->{'number_of_alignments_filtered_for_chrM'} ++;
+					next;
 				}
+				if ($is_secondary) {
+					$summary_data_ref->{'number_of_alignments_filtered_for_secondary'} ++;
+					next;
+				}
+				if ($line[4] < $mapq_cutoff) {
+					$summary_data_ref->{'number_of_alignments_filtered_for_mapping_quality'} ++;
+					next;
+				}
+				my $msidn = &MSIDN_border($line[5], $cont_del_max);
+
+				$line[11] =~ /NM:i:(\d+)/;
+				my $NM_num = $1;
+				if (!exists $chr_seq_len_ref->{$line[2]}) {
+					die "chr name ($line[2]) not recognized for $line[0] in $file";
+				}
+				if (${$msidn}{'max_I'} >= $inserted_cont_cutoff){
+					$summary_data_ref->{'number_of_alignments_filtered_for_max_insertion'} ++;
+					next;
+				} elsif ($line[3] - 1 + ${$msidn}{'mappedGenomeN'} > $chr_seq_len_ref->{$line[2]}) {
+					$summary_data_ref->{'number_of_alignments_filtered_for_exceeding_chr_coordinates'} ++;
+					next;
+				}
+
+				my $end = $line[3]-1;
+				$end += $_ for @{${$msidn}{'exonIntronRef'}};
+				my $out;
+				$out .= "$line[0]\t${$msidn}{'read_length'}\t$line[1]\t$line[2]\t$line[3]\t$line[4]\t$end\t$notSameStrand\t${$msidn}{'mappedGenome'}\t";
+				$out .= "$_," for @{${$msidn}{'clip_ends'}};
+				$out .= "\t";
+				my $is_chr_switch = 0;
+				my $is_switch_to_old_chr = 0;
+				my $is_lower_start_coord = 0;
+				if (defined $pre_chr_end) {
+					$is_chr_switch = $line[2] ne ${$pre_chr_end}[0];
+					$is_switch_to_old_chr = ($is_chr_switch and exists $processed_chrs{$line[2]});
+					$is_lower_start_coord = (!$is_chr_switch and $line[3] < ${$pre_chr_end}[1]);
+				}
+
+				if ($is_switch_to_old_chr or $is_lower_start_coord) {
+					die "$file is not sorted";
+				}
+				$processed_chrs{$line[2]} = 1;
+
+				if ( !defined($pre_chr_end) or $is_chr_switch or $line[3] > ${$pre_chr_end}[2]+$group_extra_range ){
+					if (defined($pre_chr_end)){
+						$group_ID ++;
+						$group_info{$group_ID} = [${$pre_chr_end}[0], ${$pre_chr_end}[1], ${$pre_chr_end}[2]];
+						print GROUP "$group_ID\t${$pre_chr_end}[0]\t${$pre_chr_end}[1]\t${$pre_chr_end}[2]\t";
+						for my $read(@pre_group) {
+							print GROUP "$read,";
+						}
+						print GROUP "\n";
+						if (scalar(keys %SJ_read)>0) {
+							while (my ($SJ, $SJ_info_ref) = each %SJ_read) {
+								print SJ "$group_ID\t$SJ\t${$SJ_info_ref}[0]\t${$SJ_info_ref}[1]\t${$SJ_info_ref}[2]\t"; #${$SJ_info_ref}[3]\t
+								my @perfect_reads = grep {${$SJ_info_ref}[-1]{$_}==1} keys %{${$SJ_info_ref}[-1]};
+								printf SJ "%g\t%g\t", scalar(@perfect_reads), scalar(keys %{${$SJ_info_ref}[-1]});
+								if (@perfect_reads>0){
+									print SJ "$_," for @perfect_reads;
+								} else {
+									print SJ "NA";
+								}
+
+								print SJ "\t";
+								print SJ "$_," for keys %{${$SJ_info_ref}[-1]};
+								print SJ "\n";
+							}
+						}
+					}
+					%SJ_read = ();
+					@pre_group = ();
+					$pre_chr_end = [ $line[2], &max($line[3]-$group_extra_range, 0), &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]}) ];
+				} elsif (${$pre_chr_end}[2] < &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]})) {
+					${$pre_chr_end}[2] = &min($end+$group_extra_range, $chr_seq_len_ref->{$line[2]});
+				}
+				push @pre_group, $line[0];
+
+				print DEFAULT "$line[0]\n";
+
+				my ($msidn_all);
+
+				my (@IDS_SJ, @SJ_cor_seq);
+				my $exon_end = $line[3]-1;
+				my $exon_end2 = $line[3]-1;
+
+				my ($insert_num_total, $delete_num_total) = (${$msidn}{'insertion_nt'}, ${$msidn}{'deletion_nt'});
+				my ($subst_num_total) = $NM_num-$insert_num_total- $delete_num_total;
+				my ($insert_num_SJ, $delete_num_SJ, $substi_num_SJ) = (0,0,0);
+				my ($insert_num_bg, $delete_num_bg, $substi_num_bg, $total_bg) = (0,0,0,0);
+				for my $j (0 .. $#{${$msidn}{'ID_from_current_SJ'}}){
+
+					my @next_exon_ID = @{${$msidn}{'ID_from_current_SJ'}[$j]};
+					my @next_exon_M = @{${$msidn}{'M_from_current_SJ'}[$j]};
+
+					for my $ID_info(@next_exon_ID) {
+						if (${$ID_info}[1] > $SJFS_dist and ${$ID_info}[2] > $SJFS_dist) {
+							if (${$ID_info}[0] > 0) {
+								$insert_num_bg += ${$ID_info}[0];
+							} else {
+								$delete_num_bg -= ${$ID_info}[0];
+							}
+							$total_bg += abs(${$ID_info}[0]);
+						}
+					}
+					if ($j >= 1){
+						$exon_end2 += ${$msidn}{'exonIntronRef'}[($j-1)*2];
+						$exon_end2 += ${$msidn}{'exonIntronRef'}[($j-1)*2+1];
+					}
+					print DEFAULT "(out)SJ:$j\t$exon_end2:";
+					for my $M_info(@next_exon_M) {
+						if (${$M_info}[1]+${$M_info}[0] > $SJFS_dist and ${$M_info}[2]+${$M_info}[0] > $SJFS_dist) {
+							print DEFAULT "\t";
+							print DEFAULT "$_;" for @{$M_info};
+							my ($seq_ref, $seq_read);
+							my $substr_current_num = 0;
+							my $substr_length = ${$M_info}[0];
+							if (${$M_info}[1] < $SJFS_dist){
+								$substr_length -= $SJFS_dist-${$M_info}[1];
+							}
+
+							if (${$M_info}[2] < $SJFS_dist) {
+								$substr_length -= $SJFS_dist-${$M_info}[2];
+								if ($substr_length > 0) {
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2+$SJFS_dist, $substr_length);
+									$seq_read = substr($line[9], ${$M_info}[3]+($SJFS_dist-${$M_info}[2]), $substr_length);
+								} else {
+									print DEFAULT "\tNA";
+									next;
+								}
+
+
+							} else {
+								if ($substr_length > 0) {
+									$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end2 + ${$M_info}[2], $substr_length);
+									$seq_read = substr($line[9], ${$M_info}[3], $substr_length);
+								} else {
+									print DEFAULT "\tNA";
+									next;
+								}
+
+							}
+
+							$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
+							$substi_num_bg += $substr_current_num;
+							$total_bg += $substr_length;
+							print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
+						}
+					}
+					print DEFAULT "\n";
+					next if $j == 0;
+
+					$exon_end += ${$msidn}{'exonIntronRef'}[($j-1)*2];
+					print DEFAULT "SJ:$j\t$exon_end:";
+					my @pre_exon_ID = @{${$msidn}{'ID_from_current_SJ'}[$j-1]};
+					my @pre_exon_M = @{${$msidn}{'M_from_current_SJ'}[$j-1]};
+					my ($insert_num, $deletion_num, $subst_num) = (0,0,0);
+					my $substr_current_num = 0;
+					for my $ID_info(@pre_exon_ID) {
+						if (${$ID_info}[1] < $SJFS_dist) {
+							if (${$ID_info}[0] > 0) {
+								$insert_num += ${$ID_info}[0];
+							} elsif (${$ID_info}[1] - ${$ID_info}[0] > $SJFS_dist) {
+								$deletion_num += $SJFS_dist-${$ID_info}[1];
+							} else {
+								$deletion_num -= ${$ID_info}[0];
+							}
+						}
+					}
+					for my $M_info(@pre_exon_M) {
+						if (${$M_info}[1] < $SJFS_dist) {
+							print DEFAULT "\t";
+							print DEFAULT "$_;" for @{$M_info};
+							my ($seq_ref, $seq_read);
+							my $substr_current_num = 0;
+							if (${$M_info}[1] + ${$M_info}[0] > $SJFS_dist) {
+								$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end-$SJFS_dist, $SJFS_dist-${$M_info}[1]);
+								$seq_read = substr($line[9], ${$M_info}[3]+${$M_info}[0]-($SJFS_dist-${$M_info}[1]), $SJFS_dist-${$M_info}[1]);
+								$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
+							} else {
+								$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end - ${$M_info}[1]-${$M_info}[0], ${$M_info}[0]);
+								$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
+								$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
+							}
+							$subst_num += $substr_current_num;
+							print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
+						}
+					}
+					for my $ID_info(@next_exon_ID) {
+						if (${$ID_info}[2] < $SJFS_dist) {
+							if (${$ID_info}[0] > 0) {
+								$insert_num += ${$ID_info}[0];
+							} elsif (${$ID_info}[2] - ${$ID_info}[0] > $SJFS_dist) {
+								$deletion_num += $SJFS_dist-${$ID_info}[2];
+							} else {
+								$deletion_num -= ${$ID_info}[0];
+							}
+						}
+					}
+
+					my $SJ = $line[2].$sep_SJ.$exon_end.$sep_SJ;
+					$exon_end += ${$msidn}{'exonIntronRef'}[($j-1)*2+1];
+					$SJ .= $exon_end;
+
+					for my $M_info(@next_exon_M) {
+						if (${$M_info}[2] < $SJFS_dist) {
+							print DEFAULT "\t";
+							print DEFAULT "$_;" for @{$M_info};
+							my ($seq_ref, $seq_read);
+							my $substr_current_num = 0;
+							if (${$M_info}[2] + ${$M_info}[0] > $SJFS_dist) {
+								$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], $SJFS_dist-${$M_info}[2]);
+								$seq_read = substr($line[9], ${$M_info}[3], $SJFS_dist-${$M_info}[2]);
+								$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
+							} else {
+								$seq_ref = substr($chr_seq_ref->{$line[2]}, $exon_end + ${$M_info}[2], ${$M_info}[0]);
+								$seq_read = substr($line[9], ${$M_info}[3], ${$M_info}[0]);
+								$substr_current_num += &hamming_distance("\U$seq_read", "\U$seq_ref");
+							}
+							$subst_num += $substr_current_num;
+							print DEFAULT "\t$seq_ref,$seq_read,$substr_current_num";
+						}
+					}
+					print DEFAULT "\n";
+
+					push @SJ_cor_seq, [${$msidn}{'SJ_dist_read'}[$j-1], $SJ, 0];
+
+					push @IDS_SJ, [$insert_num, $deletion_num, $subst_num];
+
+					my $isPerfect = 0;
+					if ($insert_num+$deletion_num+$subst_num == 0) {
+						$isPerfect = 1;
+						#$SJ_read{$SJ}{$line[0]} = 1;
+					}
+					if (!exists $SJ_read{$SJ}) {
+						my @SJ_info = split $sep_SJ, $SJ;
+						$SJ_read{$SJ} = [$SJ_info[0], $SJ_info[1], $SJ_info[2], $SJ_info[2]-$SJ_info[1], {$line[0] => $isPerfect}]; #$SJ_info[3],
+					} elsif ($isPerfect == 1 or !exists $SJ_read{$SJ}[-1]{$line[0]}) {
+						$SJ_read{$SJ}[-1]{$line[0]} = $isPerfect;
+					}
+					$insert_num_SJ += $insert_num;
+					$delete_num_SJ += $deletion_num;
+					$substi_num_SJ += $subst_num;
+				}
+
+				$out .= "$_," for @{${$msidn}{'exonIntronRef'}};
+				$out .= "\t";
+
+				if (@IDS_SJ > 0) {
+					$out .= "${$_}[0];${$_}[1];${$_}[2]," for @IDS_SJ;
+				} else {
+					$out .= "NA";
+				}
+
+				$out .= join '', ("\t", $NM_num, "\t", $insert_num_bg, "\t", $delete_num_bg, "\t", $substi_num_bg, "\t", $total_bg, "\t");
+
+				if (@SJ_cor_seq > 0) {
+					$out .= "${$_}[0];${$_}[1];${$_}[2]," for @SJ_cor_seq;
+				} else {
+					$out .= "NA";
+				}
+				my $tag_read_seq = 'OK';
+				if ( ${$msidn}{'read_length'} == length($line[9]) ){
+					if ($notSameStrand == 1) {
+						print OUT $group_ID+1,"\t$line_num\t$out\t",&comp_rev($line[9]),"\n";
+					} else {
+						print OUT $group_ID+1,"\t$line_num\t$out\t$line[9]\n";
+					}
+				} elsif ( ${$msidn}{'read_length'} > length($line[9]) ) {
+					print OUT $group_ID+1,"\t$line_num\t$out\tNA\n";
+					$tag_read_seq = 'short';
+				} else {
+					die "${$msidn}{'read_length'}:\t$_\n";
+				}
+				#push @{$read_info{$line[0]}}, [${$msidn}{'read_length'}, ${$msidn}{'mappedGenome'}, $line[4], $line_num, $tag_read_seq];
 			}
 		}
 
@@ -1279,15 +1354,22 @@ Arguments:
 
 	sub thread_work_loop {
 		my ($input_queue, $output_queue) = @{$_[0]};
+
+		# Allow the main thread to stop other threads with kill('TERM')
+		$SIG{'TERM'} = sub { threads->exit(); };
+
 		while (defined(my $work_details = $input_queue->dequeue())) {
-			&parallel_scan_prep($work_details);
-			$output_queue->enqueue(1);  # signal that work is done
+			my %summary_data = ();
+			&parallel_scan_prep($work_details, \%summary_data);
+			my $serialized_summary :shared;
+			$serialized_summary = freeze(\%summary_data);
+			$output_queue->enqueue($serialized_summary);  # signal that work is done
 		}
 		$output_queue->end();
 	}
 
 	sub wait_for_threads_to_complete_work {
-		my ($num_threads, $thread_input_queues_ref, $thread_output_queues_ref, $worker_threads_ref) = @_;
+		my ($num_threads, $thread_input_queues_ref, $thread_output_queues_ref, $worker_threads_ref, $summary_data_ref) = @_;
 		my @running_threads = 0 .. ($num_threads - 1);
 		my @still_running_threads = ();
 		my $first_check = 1;
@@ -1303,6 +1385,7 @@ Arguments:
 				my $thread_is_joinable = $worker_threads_ref->[$thread_i]->is_joinable();
 				my $thread_result = $thread_output_queues_ref->[$thread_i]->dequeue_nb();
 				if (defined($thread_result)) {
+					&merge_summary_results($summary_data_ref, $thread_result);
 					print "Worker $thread_i finished reporting.\n";
 				} elsif ($thread_is_joinable) {
 					# The thread should not be joinable until the work queue is ended.
@@ -1340,12 +1423,14 @@ Arguments:
 		for my $thread_i (0 .. $#{$worker_threads_ref}) {
 			if (!$worker_threads_ref->[$thread_i]->is_joinable()) {
 				print "Terminating worker $thread_i.\n";
-				$worker_threads_ref->[$thread_i]->kill('SIGTERM');
+				$worker_threads_ref->[$thread_i]->kill('TERM');
 				$any_error += 1;
 			}
 		}
 		# Give the threads a chance to exit
-		sleep $sleep_seconds;
+		if ($any_error) {
+			sleep $sleep_seconds;
+		}
 
 		for my $thread_i (0 .. $#{$worker_threads_ref}) {
 			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
@@ -1358,5 +1443,62 @@ Arguments:
 		if ($any_error) {
 			die "Exiting due to error in worker thread\n";
 		}
+	}
+
+	sub merge_summary_results {
+		my ($summary_data_ref, $thread_result) = @_;
+		my $thread_summary_ref = thaw($thread_result);
+		while (my ($key, $value) = each %{$thread_summary_ref}) {
+			$summary_data_ref->{$key} += $value;
+		}
+	}
+
+	sub initialize_summary_data {
+		my $summary_data_ref = $_[0];
+		$summary_data_ref->{'num_chrs_only_in_anno'} = 0;
+		$summary_data_ref->{'num_chrs_only_in_fa'} = 0;
+		$summary_data_ref->{'num_chrs_in_anno_and_fa'} = 0;
+		$summary_data_ref->{'num_annotated_isoforms'} = 0;
+		$summary_data_ref->{'num_annotated_splice_junctions'} = 0;
+		$summary_data_ref->{'num_high_confidence_splice_junctions'} = 0;
+		$summary_data_ref->{'total_splice_junction_read_count'} = 0;
+		$summary_data_ref->{'perfect_splice_junction_read_count'} = 0;
+		$summary_data_ref->{'number_of_read_groups'} = 0;
+		$summary_data_ref->{'number_of_reads_output'} = 0;
+		$summary_data_ref->{'number_of_alignments_filtered_for_chrM'} = 0;
+		$summary_data_ref->{'number_of_alignments_filtered_for_secondary'} = 0;
+		$summary_data_ref->{'number_of_alignments_filtered_for_mapping_quality'} = 0;
+		$summary_data_ref->{'number_of_alignments_filtered_for_max_insertion'} = 0;
+		$summary_data_ref->{'number_of_alignments_filtered_for_exceeding_chr_coordinates'} = 0;
+		$summary_data_ref->{'num_reads_filtered_missing_full_sequence'} = 0;
+	}
+
+	sub write_summary_file {
+		my ($summary_path, $summary_data_ref) = @_;
+		open(my $summary_handle, '>', $summary_path) or die "cannot write $summary_path: $!";
+		print $summary_handle "$summary_data_ref->{'perl_command'}\n";
+		print $summary_handle "number of chromosomes only in input annotation: $summary_data_ref->{'num_chrs_only_in_anno'}\n";
+		print $summary_handle "number of chromosomes only in input FASTA: $summary_data_ref->{'num_chrs_only_in_fa'}\n";
+		print $summary_handle "number of chromosomes in both annotation and FASTA: $summary_data_ref->{'num_chrs_in_anno_and_fa'}\n";
+		print $summary_handle "number of isoforms in input annotation: $summary_data_ref->{'num_annotated_isoforms'}\n";
+		print $summary_handle "number of splice junctions in input annotation: $summary_data_ref->{'num_annotated_splice_junctions'}\n";
+		print $summary_handle "number of high confidence splice junctions: $summary_data_ref->{'num_high_confidence_splice_junctions'}\n";
+		print $summary_handle "total over all splice junctions of supporting reads: $summary_data_ref->{'total_splice_junction_read_count'}\n";
+		print $summary_handle "total over all splice junctions of perfect reads: $summary_data_ref->{'perfect_splice_junction_read_count'}\n";
+		print $summary_handle "number of read groups: $summary_data_ref->{'number_of_read_groups'}\n";
+		print $summary_handle "number of reads in output: $summary_data_ref->{'number_of_reads_output'}\n";
+		print $summary_handle "number of chrM alignments filtered: $summary_data_ref->{'number_of_alignments_filtered_for_chrM'}\n";
+		print $summary_handle "number of secondary alignments filtered: $summary_data_ref->{'number_of_alignments_filtered_for_secondary'}\n";
+		print $summary_handle "number of alignments filtered for mapping quality: $summary_data_ref->{'number_of_alignments_filtered_for_mapping_quality'}\n";
+		print $summary_handle "number of alignments filtered for a long insertion: $summary_data_ref->{'number_of_alignments_filtered_for_max_insertion'}\n";
+		print $summary_handle "number of alignments filtered for unrecognized coordinates: $summary_data_ref->{'number_of_alignments_filtered_for_exceeding_chr_coordinates'}\n";
+		print $summary_handle "number of reads filtered for missing full sequence: $summary_data_ref->{'num_reads_filtered_missing_full_sequence'}\n";
+		close $summary_handle;
+	}
+
+	sub print_with_timestamp {
+		my ($message) = @_;
+		my $time_value = localtime;
+		print "[$time_value] $message\n";
 	}
 }

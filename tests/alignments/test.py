@@ -61,8 +61,8 @@ class AlignmentsBaseTest(tests.base_test.BaseTest):
         chr_id = 'chr1'
         gene_id = 'ENSG1'
         gene_name = 'GENE1'
-        # 1 gene with 3 exons
-        gene = self._get_random_gene(num_exons=3)
+        # 1 gene with 4 exons
+        gene = self._get_random_gene(num_exons=4)
         gene.id = gene_id
         gene.name = gene_name
         chromosome = self._make_chromosome_from_genes([gene])
@@ -349,6 +349,94 @@ class SecondaryAlignmentTest(AlignmentsBaseTest):
         expected_isoform['transcript_name'] = (
             self._chromosomes[0].genes[0].isoforms[1].name)
         expected_isoforms.append(expected_isoform)
+        return expected_isoforms
+
+
+class MissingSequenceTest(AlignmentsBaseTest):
+    def setUp(self):
+        super().setUp()
+        self._test_name = 'missing_sequence'
+        self._data_dir = os.path.join(self._test_dir,
+                                      '{}_data'.format(self._test_name))
+        self._out_dir = os.path.join(self._test_dir,
+                                     '{}_out'.format(self._test_name))
+        self._log_dir = os.path.join(self._test_dir,
+                                     '{}_logs'.format(self._test_name))
+        self._work_dir = os.path.join(self._out_dir, 'work_dir')
+
+    def test(self):
+        self._run_test()
+
+    def _get_alignments(self):
+        alignments = super()._get_alignments()
+        chrom = self._alignment_chrom
+        chrom_seq = chrom.get_sequence_and_set_coords()
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 2])
+        tests.base_test.append_copies(alignments, alignment, 2)
+        # Trim off 1 base from sequence and quality
+        alignment.set_sequence_from_cigar_and_chr_seq(chrom_seq)
+        alignment.set_default_quality_from_sequence()
+        alignment.sequence = alignment.sequence[:-1]
+        alignment.quality = alignment.quality[:-1]
+        # Replace last matched base with a hard clip
+        alignment.cigar.operations[-1].num -= 1
+        alignment.cigar.add_hard_clip(1)
+        tests.base_test.append_copies(alignments, alignment, 3)
+        # No sequence
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 2])
+        alignment.sequence = '*'
+        alignment.quality = '*'
+        tests.base_test.append_copies(alignments, alignment, 4)
+
+        # like above but for [0, 2, 3]
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 2, 3])
+        tests.base_test.append_copies(alignments, alignment, 2)
+        alignment.set_sequence_from_cigar_and_chr_seq(chrom_seq)
+        alignment.set_default_quality_from_sequence()
+        alignment.sequence = alignment.sequence[:-1]
+        alignment.quality = alignment.quality[:-1]
+        alignment.cigar.operations[-1].num -= 1
+        alignment.cigar.add_hard_clip(1)
+        tests.base_test.append_copies(alignments, alignment, 3)
+        alignment = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 2, 3])
+        alignment.sequence = '*'
+        alignment.quality = '*'
+        tests.base_test.append_copies(alignments, alignment, 4)
+
+        return alignments
+
+    def _get_expected_isoforms(self):
+        expected_isoforms = super()._get_expected_isoforms()
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[2])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[0].genes[0].isoforms[1].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[0].genes[0].isoforms[1].name)
+        expected_isoforms.append(expected_isoform)
+
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[2])
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[3])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[0].name, 0,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+
         return expected_isoforms
 
 

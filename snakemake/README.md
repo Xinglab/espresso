@@ -142,8 +142,11 @@ The visualization can be created manually by following the instructions in [../R
 
 ## Output
 
+* `espresso_out/s_work_dir/espresso_s_summary.txt`
+* `espresso_out/c_work_dir/espresso_c_summary.txt`
 * `espresso_out/q_work_dir/`
   + `samples_N2_R0_abundance.esp`
   + `samples_N2_R0_updated.gtf`
   + `samples_N2_R0_compatible_isoform.tsv`
+  + `espresso_q_summary.txt`
 * In addition to the output files there are also log files. The log files are written to the output directories and are named after the rules in [Snakefile](Snakefile). There will be a `{rule_name}_log.out` and `{rule_name}_log.err` with the stdout and stderr of the command run for that rule. There will also be a `.cluster.out`, `.cluster.err`, and `.cluster.usage` if the rule was submitted to the cluster using [snakemake_profile/cluster_submit.py](snakemake_profile/cluster_submit.py).

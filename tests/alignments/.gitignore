@@ -4,6 +4,9 @@
 /cigar_format_data/
 /cigar_format_logs/
 /cigar_format_out/
+/missing_sequence_data/
+/missing_sequence_logs/
+/missing_sequence_out/
 /secondary_alignment_data/
 /secondary_alignment_logs/
 /secondary_alignment_out/
