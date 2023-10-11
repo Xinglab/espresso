@@ -221,11 +221,11 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
             split_fasta = os.path.join(self._c_work_dir, 'fastas',
                                        '{}.fa'.format(work_dir_i))
             command = [
-                'perl', self._espresso_c, '-I', c_work_dir, '-F',
-                split_fasta, '-X', '0', '-T', threads
+                'perl', self._espresso_c, '-I', c_work_dir, '-F', split_fasta,
+                '-X', '0', '-T', threads
             ]
-            c_log = os.path.join(self._log_dir, 'espresso_c_{}.log'
-                                 .format(work_dir_i))
+            c_log = os.path.join(self._log_dir,
+                                 'espresso_c_{}.log'.format(work_dir_i))
             tests.base_test.run_command_with_log(command, c_log)
 
     def _check_c_output(self):
@@ -289,7 +289,7 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-206',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 86
+                'PC3E': 110
             },
             'ENST00000526025.2_2': {
                 'transcript_name': 'CD44-222',
@@ -307,7 +307,7 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-210',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 25,
-                'PC3E': 7
+                'PC3E': 8
             },
             'ENST00000527326.1_1': {
                 'transcript_name': 'CD44-225',
@@ -319,13 +319,13 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-209',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 5,
-                'PC3E': 404
+                'PC3E': 477
             },
             'ENST00000531118.5_1': {
                 'transcript_name': 'CD44-232',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 3,
-                'PC3E': 13
+                'PC3E': 12
             },
             'ENST00000534296.5_1': {
                 'transcript_name': 'CD44-238',
@@ -342,44 +342,44 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
             'ENST00000263398.10_1': {
                 'transcript_name': 'CD44-201',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 1144,
-                'PC3E': 182
+                'GS689': 1168,
+                'PC3E': 235
             },
             'ENST00000428726.8_3': {
                 'transcript_name': 'CD44-208',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 29
+                'PC3E': 23
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 2): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 18
+                'PC3E': 22
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 3): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 19
+                'PC3E': 23
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 1): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 1,
-                'PC3E': 10
+                'PC3E': 12
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 5): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 95
+                'PC3E': 130
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 4): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 1,
-                'PC3E': 64
+                'PC3E': 75
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 0): {
                 'transcript_name': 'NA',

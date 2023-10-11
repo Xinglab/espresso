@@ -32,15 +32,32 @@ vis_normalize_counts: false
 vis_target_gene: ''
 vis_minimum_count: 1
 vis_descriptive_name: 'ESPRESSO'
-# Reference files
+# Reference files:
+# The snakemake can automatically download and gunzip files if
+# a matching url entry is given in the reference_files section below.
+# If the entry in the reference_files section ends with .gz then the
+# snakemake will gunzip the file.
+# **The gtf_name and fasta_name should not end with .gz**
 gtf_name: 'gencode.v34lift37.annotation.gtf'
 fasta_name: 'ucsc.hg19.fasta'
+# The entries under reference_files should be
+# file_name.with.extension:
+#   url: 'url_path/to_the/file_name.with.extension'
+#
+# The 'url:' will be used to download the file and it will be put in
+# references/ with the name given on the line above the 'url:'.
+# The file will be gunzipped and the .gz removed if needed.
 reference_files:
   gencode.v34lift37.annotation.gtf.gz:
     url: 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh37_mapping/gencode.v34lift37.annotation.gtf.gz'
   ucsc.hg19.fasta.gz:
     url: 'http://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz'
-# Input samples
+# Input samples:
+# Each sample name will have a separate column in the abundance.esp output file.
+# Replicates can be given as separate sample names
+# (sample_1_rep_1, sample_1_rep_2, ...) to have the abundance counted separately.
+# Alternatively, replicates can be listed under the same sample name to combine
+# the counts in the final output.
 samples:
   sample_1_name:
     - fastq: '/path/to/file.fastq'

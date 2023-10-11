@@ -9,12 +9,12 @@ use ESPRESSO_Version;
 
 my $version_number = ESPRESSO_Version::get_version_number();
 my $version_string = "C_$version_number";
-my ($help, $in, $fa, $anno, $out, $target_ID, $num_thread, $mapq_cutoff, $keep_tmp, $proc_num_cutoff, $is_stranded,
+my ($help, $in, $fa, $out, $target_ID, $num_thread, $mapq_cutoff, $keep_tmp, $proc_num_cutoff, $is_stranded,
 	$cont_del_max, $chrM, $inserted_cont_cutoff, $first_exon_diff_cutoff, $SJFS_dist, $SJFS_dist_add, $align_length_ratio_cutoff, $fold_end_length_lost_cutoff,
 	$correct_suggest_SJ_distance_max, $confirm_prob_fold_cutoff, $evalue_cor, $second_exon_align_length_ratio_cutoff, $length4nhmmer_max,
-	$END_dist_add, $blast_score_difference_cutoff, $additional_candidate_prob_fold_cutoff, $directly_approve_length_additional, $max_overlap_SJ_group);
+	$END_dist_add, $blast_score_difference_cutoff, $additional_candidate_prob_fold_cutoff, $directly_approve_length_additional, $max_overlap_SJ_group, $sort_buffer_size);
 
-
+my $arguments_before_parsing = "@ARGV";
 Getopt::Long::GetOptions (
 
 	'in|I=s'					=>	\$in,
@@ -40,6 +40,7 @@ Getopt::Long::GetOptions (
 	'directly_approve_length_additional=i'		=>	\$directly_approve_length_additional,
 	'proc_num_cutoff=i'							=>	\$proc_num_cutoff,
 	'length4nhmmer_max=i'							=>	\$length4nhmmer_max,
+	'sort_buffer_size=s'	=>	\$sort_buffer_size
 
 );
 
@@ -66,6 +67,8 @@ Arguments:
 
     -T, --num_thread
           thread number (default: 5)
+    --sort_buffer_size
+          memory buffer size for running 'sort' commands (default: 2G)
 
 ";
 } elsif ( !defined($in) or !defined($fa) or !defined($target_ID) ) {
@@ -101,6 +104,12 @@ Arguments:
 	$proc_num_cutoff = 20_000 if !defined $proc_num_cutoff;
 
 	$chrM = 'chrM' if !defined $chrM;
+	if (defined $sort_buffer_size) {
+		$sort_buffer_size = "--buffer-size=$sort_buffer_size";
+	} else {
+		$sort_buffer_size = "--buffer-size=2G";
+	}
+
 	my @ends = ('start','end');
 
 	my @warn_reason;
@@ -127,6 +136,12 @@ Arguments:
 		die @die_reason;
 	}
 
+	# The summary file will be written as a final step
+	my $summary_path = "$in/$target_ID/espresso_c_summary.txt";
+	my %summary_data = ();
+	&initialize_summary_data(\%summary_data);
+	$summary_data{'perl_command'} = "$^X " . __FILE__ . " $arguments_before_parsing";
+
 	my $sep_end_blast = '/';
 	my $sep_SJ = ':';
 
@@ -150,14 +165,14 @@ Arguments:
 
 	mkdir "$in/$target_ID/all";
 
-	printf  '['.scalar(localtime)."] Loading splice junction info\n";
+	print_with_timestamp("Loading splice junction info");
 	#my %group_all_SJ;
 
 	# Sort the alignments to ensure deterministic grouping of reads and SJs when calling blast.
 	# The sort columns are: -k1,1n (numeric sort of read group), -k3,3 (default sort of read ID)
 	my $in_sam_list3_path = "$in/$target_ID/sam.list3";
 	my $in_sam_list3_tmp_path = "$in_sam_list3_path" . ".tmp";
-	my $in_sam_list3_sort_command = "sort -k1,1n -k3,3 $in_sam_list3_path --output $in_sam_list3_tmp_path";
+	my $in_sam_list3_sort_command = "sort $sort_buffer_size -k1,1n -k3,3 $in_sam_list3_path --output $in_sam_list3_tmp_path";
 	my $exit_sort = system($in_sam_list3_sort_command);
 	if ($exit_sort != 0) {
 		die "Failed to run '$in_sam_list3_sort_command'. Exit code is $exit_sort";
@@ -237,11 +252,10 @@ Arguments:
 
 	%necessary_groups=();
 
-	printf  '['.scalar(localtime)."] Requesting system to split SAMLIST into %g pieces\n", int($num_thread);
+	print_with_timestamp(sprintf("Requesting system to split SAMLIST into %g pieces", int($num_thread)));
 	my $split_list_first_read = &split_sam_file("$in/$target_ID/sam.list3", int($num_thread), "$in/$target_ID/", 'group');
-	
-	print  '[', scalar(localtime), "] Loading references\n";
 
+	print_with_timestamp("Loading references");
 
 	my %chr_seq;
 	my %chr_seq_len;
@@ -254,29 +268,33 @@ Arguments:
 		if (/^>/) {
 			my $info = substr($_, 1, length($_)-1);
 			($current_chr, undef) = split /\s+/, $info;
-		} else {
+		} elsif (defined $current_chr) {
 			$chr_seq{$current_chr} .= uc($_);
 			$chr_seq_len{$current_chr} += length($_);
 		}
 	}
 	close FA;
+	my $num_chr_seqs = scalar(keys %chr_seq);
+	if ($num_chr_seqs == 0) {
+		die "No sequence information found in $fa";
+	}
 
 	#open READ_SUMM, ">", $out."/read_summary.txt" or die "cannot write $out/read_summary.txt: $!";
 
 	my @output_titles = ('group_ID', 'line_num','readID','read_length','flag','chr','start','mapq','end','notSameStrand','mappedGenome','clip_ends','exonIntronRef','IDS_SJ_ref','NM_num','insNumBg','delNumBg','substNumBg','totalNumBg','SJcorSeqRef','readSeq'); #'SAM', 
 	#21
-	printf  '['.scalar(localtime)."] Scanning SAMLIST by %g workers\n", int($num_thread/2);
+	print_with_timestamp(sprintf("Scanning SAMLIST by %g workers", int($num_thread/2)));
 
 	my @split_list_sort = sort {$a cmp $b} keys %{$split_list_first_read};
 	my @ths;
 	for my $file (@split_list_sort){
-		my $th = threads -> new({'context' => 'scalar'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths)]);
+		my $th = threads -> new({'context' => 'list'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths)]);
 		my $th_id = $th->tid();
 		print " Worker $th_id begins to scan $file.\n";
 		unshift @ths, $th;
 	}
 
-	&wait_for_threads_to_complete_work(\@ths);
+	&wait_for_threads_to_complete_work(\@ths, \%summary_data);
 	@ths = ();
 
 	while (my ($chr, $len) = each %chr_seq_len) {
@@ -313,12 +331,19 @@ Arguments:
 		closedir DIR;
 	}
 
-	print  '[', scalar(localtime), "] ESPRESSO_C finished its work.\n";
+	&write_summary_file($summary_path, \%summary_data);
+
+	print_with_timestamp("ESPRESSO_C finished its work.");
 
 	sub parallel_scan_samlist {
 		my ($file, $key_read, $thread_ID) = @{$_[0]};
+
+		# Allow the main thread to stop other threads with kill('TERM')
+		$SIG{'TERM'} = sub { threads->exit(); };
+
 		my ($pinhead, $n, @all_info_read, $last_n);
 		my ($same_group_count) = (0); #, $accu_num
+		my %summary_data = ();
 		my %pre_read_align_length;
 		my (%group_SJ_cluster, %group_SJ_cluster_ends);
 		open IN, "<", "$in/$target_ID/$file" or die "cannot open $in/$target_ID/$file: $!";
@@ -366,7 +391,7 @@ Arguments:
 					
 					$same_group_count ++;
 					if (scalar(%group_SJ_cluster) > 0) {
-						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0); #, $time
+						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0, \%summary_data); #, $time
 					} else {
 						open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
 						for my $read_ID (0 .. $#all_info_read){
@@ -374,6 +399,8 @@ Arguments:
 							my $out = &summary_final_output($all_info_read[$read_ID], $n, $read_ID_update, {});
 							print READ_FINAL $out;
 						}
+						$summary_data{'num_reads_output'} += (scalar @all_info_read);
+						$summary_data{'num_reads_without_SJs_for_blast'} += (scalar @all_info_read);
 						close READ_FINAL;
 					}
 					@all_info_read = ();
@@ -445,7 +472,7 @@ Arguments:
 					
 					$same_group_count ++;
 					if (scalar(%group_SJ_cluster) > 0) {
-						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0); #, $time
+						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0, \%summary_data); #, $time
 					} else {
 						open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
 						for my $read_ID (0 .. $#all_info_read){
@@ -453,6 +480,8 @@ Arguments:
 							my $out = &summary_final_output($all_info_read[$read_ID], $n, $read_ID_update, {});
 							print READ_FINAL $out;
 						}
+						$summary_data{'num_reads_output'} += (scalar @all_info_read);
+						$summary_data{'num_reads_without_SJs_for_blast'} += (scalar @all_info_read);
 						close READ_FINAL;
 					}
 					@all_info_read = ();
@@ -469,7 +498,7 @@ Arguments:
 		}
 
 		# indicate that the thread completed
-		return 1;
+		return (1, \%summary_data);
 	}
 
 	sub summary_final_output {
@@ -530,7 +559,7 @@ Arguments:
 	}
 
 	sub blast_prep {
-		my ($all_info_read_ref, $group_SJ_cluster_ref, $group_SJ_cluster_ends_ref, $output_pre, $n, $same_group_count, $thread_ID, $chr0) = @_;
+		my ($all_info_read_ref, $group_SJ_cluster_ref, $group_SJ_cluster_ends_ref, $output_pre, $n, $same_group_count, $thread_ID, $chr0, $summary_data_ref) = @_;
 		###my $chr0 = $group_ID_mkdir{$n}[1];
 		#my $out_dir = "${output_pre}_$n";
 		my $out_dir = "$in/$target_ID/blast_$n/";
@@ -749,6 +778,7 @@ Arguments:
 		for my $index_ori (0 .. $max_index) {
 			#next unless exists ${$group_SJ_cluster_ref}{$index_ori};
 			next unless exists $read_seq_pos{$index_ori};
+			# TODO $current_cluster_SJ_number may always be 0 because ${$_}[1] is 'yes' or 'no'
 			my $current_cluster_SJ_number = grep {${$_}[1]>0} @{${$group_SJ_cluster_ref}{$index_ori}};
 			#print ALLSJ "reviseN: $index_ori($current_cluster_SJ_number)\n";
 			if (@{$read_seq_pos{$index_ori}} > 0 and $max_length_cluster{$index_ori}[2] > 0) {
@@ -869,7 +899,7 @@ Arguments:
 					# Close the temp files to flush them
 					close($blast_sj_temp_handle);
 					close($blast_read_temp_handle);
-					&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor);
+					&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref);
 					($accumul_read_line, $accumul_SJ_line) = (0, 0);
 					# Reopen the temp files to truncate them.
 					open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
@@ -904,7 +934,7 @@ Arguments:
 				# Close the temp files to flush them
 				close($blast_sj_temp_handle);
 				close($blast_read_temp_handle);
-				&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor);
+				&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref);
 				($accumul_read_line, $accumul_SJ_line) = (0, 0);
 				# Reopen the temp files to truncate them.
 				open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
@@ -926,14 +956,16 @@ Arguments:
 		}
 
 		my $output_blast;
-
+		my $was_no_blast_output = 0;
 		if ( -s $out_dir."/read_SJ_group_$same_group_count.blast" > 0 ) {
 			$output_blast = $out_dir."/read_SJ_group_$same_group_count.sort.blast";
-			my $exit_sort = system("sort -k1,1 -k12,12r $out_dir/read_SJ_group_$same_group_count.blast > $output_blast");
+			my $sort_command = "sort $sort_buffer_size -k1,1 -k12,12r $out_dir/read_SJ_group_$same_group_count.blast > $output_blast";
+			my $exit_sort = system($sort_command);
 			if ($exit_sort != 0) {
-				warn "Failed to run \"sort -k1,1 -k12,12r $out_dir/read_SJ_group_$same_group_count.blast > $output_blast\". Exit code is $exit_sort";
+				warn "Failed to run \"$sort_command\". Exit code is $exit_sort";
 			}
 		} else {
+			$was_no_blast_output = 1;
 			for my $read_ID(0 .. $#{$all_info_read_ref}){
 				if ($recorded_index[$read_ID] == 1){
 					$read_no_SJ{$read_ID} = 1;
@@ -948,7 +980,12 @@ Arguments:
 				my $out = &summary_final_output(${$all_info_read_ref}[$read_ID], $n, $read_ID_update, \%hc_SJ);
 				print READ_FINAL $out;
 			}
-
+			$summary_data_ref->{'num_reads_output'} += (scalar keys %read_no_SJ);
+			if ($was_no_blast_output) {
+				$summary_data_ref->{'num_reads_missing_blast_output'} += (scalar keys %read_no_SJ);
+			} else {
+				$summary_data_ref->{'num_reads_without_SJs_for_blast'} += (scalar keys %read_no_SJ);
+			}
 			close READ_FINAL;
 		}
 
@@ -1150,6 +1187,7 @@ Arguments:
 						if ($exit_nhmmer != 0) {
 							warn "Failed to run \"grep -A1 --no-group-separator$accumul_SJ_string $out_dir/lost_end_group_$same_group_count.fa | nhmmer --dna -T 3 --max --cpu 2 --tblout $out_dir/lost_end_group_${same_group_count}_$i.hmmer1 --qformat fasta --qsingle_seqs - $out_dir/current_flankingSJ.fa > /dev/null\". Exit code is $exit_nhmmer"; 
 						}
+						$summary_data_ref->{'number_of_nhmmer_calls'} ++;
 						$start_line += $accumul_SJ_line;
 						($accumul_SJ_line, $accumul_read_line, $accumul_SJ_string) = (0, 0, '');
 					}
@@ -1161,6 +1199,7 @@ Arguments:
 						if ($exit_nhmmer != 0) {
 							warn "Failed to run \"grep -A1 --no-group-separator$accumul_SJ_string $out_dir/lost_end_group_$same_group_count.fa | nhmmer --dna -T 3 --max --cpu 2 --tblout $out_dir/lost_end_group_${same_group_count}_0.hmmer1 --qformat fasta --qsingle_seqs - $out_dir/current_flankingSJ.fa > /dev/null\". Exit code is $exit_nhmmer"; 
 						}
+						$summary_data_ref->{'number_of_nhmmer_calls'} ++;
 				}
 
 				
@@ -1176,9 +1215,10 @@ Arguments:
 				$blast_lost = "$out_dir/lost_end_group.hmmer2";
 				system("cat @blasts_lost > $out_dir/lost_end_groups.hmmer1");
 				if (-s "$out_dir/lost_end_groups.hmmer1">0){
-					my $exit_sort = system("sort -k3,3 -k14,14r -s $out_dir/lost_end_groups.hmmer1 > $blast_lost");
+					my $sort_command = "sort $sort_buffer_size -k3,3 -k14,14r -s $out_dir/lost_end_groups.hmmer1 > $blast_lost";
+					my $exit_sort = system($sort_command);
 					if ($exit_sort != 0) {
-						warn "Failed to run \"sort -k3,3 -k14,14r -s $out_dir/lost_end_groups.hmmer1 > $blast_lost\". Exit code is $exit_sort";
+						warn "Failed to run \"$sort_command\". Exit code is $exit_sort";
 					}
 				}
 				if (!defined $keep_tmp) {
@@ -1321,8 +1361,10 @@ Arguments:
 						my @SJ_cor_correct = split $sep_SJ, ${$SJ_info_correct}[0];
 						if (${$SJ_info_correct}[0] eq ${$SJ_info}[1]) {
 							$out .= "pass\t";
+							$summary_data_ref->{'number_of_passed_SJ_alignments'} ++;
 						} else {
 							$out .= "corrected\t";
+							$summary_data_ref->{'number_of_corrected_SJ_alignments'} ++;
 						}
 						my @dist_correct = (${$SJ_info_correct}[2], $read_length-${$SJ_info_correct}[2]);
 						$out .= "${$SJ_info_correct}[0]\t$dist_correct[${$info_ref}{'notSameStrand'}]\t$dist_correct[1-${$info_ref}{'notSameStrand'}]\t${$SJ_info_correct}[1]\t";
@@ -1336,6 +1378,7 @@ Arguments:
 
 					} else {
 						$out .= "fail\tNA\tNA\tNA\tNA\t";
+							$summary_data_ref->{'number_of_failed_SJ_alignments'} ++;
 						if (defined $hc_SJ{${$SJ_info}[1]}) {
 							$out .= "$hc_SJ{${$SJ_info}[1]}[1]\t";
 						} else {
@@ -1361,7 +1404,11 @@ Arguments:
 						my @dist_correct = (${$SJ_info}[2], $read_length-${$SJ_info}[2]);
 						$out .= "$out_line\t$i_convert\tNA\tNA\tNA\tadded\t${$SJ_info}[0]\t$dist_correct[${$info_ref}{'notSameStrand'}]\t$dist_correct[1-${$info_ref}{'notSameStrand'}]\t${$SJ_info}[1]\tNA\t";
 						$out .= "$hc_SJ{${$SJ_info}[0]}[1]\n";
-
+						if ($i == '-1') {
+							$summary_data_ref->{'number_of_added_first_SJ_alignments'} ++;
+						} else {
+							$summary_data_ref->{'number_of_added_last_SJ_alignments'} ++;
+						}
 					}
 				}
 
@@ -1405,6 +1452,7 @@ Arguments:
 				}
 				$out .= join '', ("${$all_info_read_ref}[$read_ID]{'readID'}\tmapped_length_read\t",$read_length-$unmapped_ends_final[0]-$unmapped_ends_final[1],"\n");
 				print READ_FINAL $out;
+				$summary_data_ref->{'num_reads_output'} ++;
 			}
 
 			close READ_FINAL;
@@ -1416,6 +1464,8 @@ Arguments:
 				my $read_ID_update = ($same_group_count-1)*$proc_num_cutoff+$read_ID;
 				my $out = &summary_final_output(${$all_info_read_ref}[$read_ID], $n, $read_ID_update, \%hc_SJ);
 				print READ_FINAL $out;
+				$summary_data_ref->{'num_reads_output'} ++;
+				$summary_data_ref->{'num_reads_missing_blast_output'} ++;
 			}
 			close READ_FINAL;
 		}
@@ -1562,7 +1612,6 @@ Arguments:
 					$est_pos_read = ${$SJ_info_ref}[0];
 					$corrected_SJ_pos{$SJ} = [$SJ, $mapper_SJ_IDM_prob_hyperg{$SJ}, $est_pos_read, ${$SJ_info_ref}[1], ${$SJ_info_ref}[2]];
 					print READ_SUMM "perfect_SJ_confirmed: $SJ, ${$SJ_info_ref}[0], ${$SJ_info_ref}[1]: $SJ, $mapper_SJ_IDM_prob_hyperg{$SJ}, ", ${$SJ_info_ref}[0], "\n";
-
 				} elsif (@sort_score >= 2 and $sort_score[0]{'prob_hyperg'} >= $confirm_prob_fold_cutoff*$sort_score[1]{'prob_hyperg'}) { #### change to larger than 0.9*all_probability 
 
 					$corrected_SJ_pos{$SJ} = [$sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, $est_pos_read, 0, ${$SJ_info_ref}[2]];
@@ -1926,10 +1975,10 @@ Arguments:
 		close($orig_read_handle);
 		close($tmp_write_handle);
 
-		my $sort_command = "sort --numeric-sort --output=$orig_file_path $tmp_file_path";
+		my $sort_command = "sort $sort_buffer_size --numeric-sort --output=$orig_file_path $tmp_file_path";
 		my $exit_sort = system($sort_command);
 		if ($exit_sort != 0) {
-		  die "Failed to run $sort_command. Exit code is $exit_sort";
+			die "Failed to run $sort_command. Exit code is $exit_sort";
 		}
 
 		open(my $sort_read_handle, "<", $orig_file_path);
@@ -1954,7 +2003,7 @@ Arguments:
 	}
 
 	sub run_blast_on_files {
-		my ($sj_file_path, $read_file_path, $out_dir, $same_group_count, $evalue_cor) = @_;
+		my ($sj_file_path, $read_file_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref) = @_;
 		my $db_command = "makeblastdb -in $sj_file_path -dbtype nucl -out $out_dir/current_db -title current_db";
 		my $exit_db = system($db_command);
 		if ($exit_db != 0) {
@@ -1965,6 +2014,7 @@ Arguments:
 		if ($exit_blast != 0) {
 			warn "Failed to run \"$blast_command\". Exit code is $exit_blast";
 		}
+		$summary_data_ref->{'number_of_blastn_calls'} ++;
 	}
 
 	sub estimate_blast_runtime {
@@ -1986,7 +2036,7 @@ Arguments:
 	}
 
 	sub wait_for_threads_to_complete_work {
-		my $threads_ref = $_[0];
+		my ($threads_ref, $summary_data_ref) = @_;
 		my $num_threads = scalar(@{$threads_ref});
 		my @running_threads = 0 .. ($num_threads - 1);
 		my @still_running_threads = ();
@@ -2003,10 +2053,12 @@ Arguments:
 			for my $thread_i (@running_threads) {
 				my $thread_is_joinable = $threads_ref->[$thread_i]->is_joinable();
 				if ($thread_is_joinable) {
-					my $result = $threads_ref->[$thread_i]->join();
-					if ($result == 1) {
+					my @results = $threads_ref->[$thread_i]->join();
+					if (((scalar @results) == 2) and $results[0] == 1) {
 						my $th_id = $threads_ref->[$thread_i]->tid();
 						print "Worker $th_id finished reporting.\n";
+						my $thread_summary_ref = $results[1];
+						&merge_summary_results($summary_data_ref, $thread_summary_ref);
 					} else {
 						$had_error = 1;
 					}
@@ -2030,7 +2082,7 @@ Arguments:
 			if (!$threads_ref->[$thread_i]->is_joinable()) {
 				my $th_id = $threads_ref->[$thread_i]->tid();
 				print "Terminating worker $th_id.\n";
-				$threads_ref->[$thread_i]->kill('SIGTERM');
+				$threads_ref->[$thread_i]->kill('TERM');
 			}
 		}
 		# Give the threads a chance to exit
@@ -2048,4 +2100,47 @@ Arguments:
 		die "Exiting due to error in worker thread\n";
 	}
 
+	sub merge_summary_results {
+		my ($summary_data_ref, $thread_summary_ref) = @_;
+		while (my ($key, $value) = each %{$thread_summary_ref}) {
+			$summary_data_ref->{$key} += $value;
+		}
+	}
+
+	sub initialize_summary_data {
+		my $summary_data_ref = $_[0];
+		$summary_data_ref->{'num_reads_output'} = 0;
+		$summary_data_ref->{'num_reads_without_SJs_for_blast'} = 0;
+		$summary_data_ref->{'num_reads_missing_blast_output'} = 0;
+		$summary_data_ref->{'number_of_passed_SJ_alignments'} = 0;
+		$summary_data_ref->{'number_of_corrected_SJ_alignments'} = 0;
+		$summary_data_ref->{'number_of_failed_SJ_alignments'} = 0;
+		$summary_data_ref->{'number_of_added_first_SJ_alignments'} = 0;
+		$summary_data_ref->{'number_of_added_last_SJ_alignments'} = 0;
+		$summary_data_ref->{'number_of_blastn_calls'} = 0;
+		$summary_data_ref->{'number_of_nhmmer_calls'} = 0;
+	}
+
+	sub write_summary_file {
+		my ($summary_path, $summary_data_ref) = @_;
+		open(my $summary_handle, '>', $summary_path) or die "cannot write $summary_path: $!";
+		print $summary_handle "$summary_data_ref->{'perl_command'}\n";
+		print $summary_handle "number of reads in output: $summary_data_ref->{'num_reads_output'}\n";
+		print $summary_handle "number of reads without splice junctions to blast: $summary_data_ref->{'num_reads_without_SJs_for_blast'}\n";
+		print $summary_handle "number of reads missing blast output: $summary_data_ref->{'num_reads_missing_blast_output'}\n";
+		print $summary_handle "number of passed splice junction alignments: $summary_data_ref->{'number_of_passed_SJ_alignments'}\n";
+		print $summary_handle "number of corrected splice junction alignments: $summary_data_ref->{'number_of_corrected_SJ_alignments'}\n";
+		print $summary_handle "number of failed splice junction alignments: $summary_data_ref->{'number_of_failed_SJ_alignments'}\n";
+		print $summary_handle "number of added first splice junction alignments: $summary_data_ref->{'number_of_added_first_SJ_alignments'}\n";
+		print $summary_handle "number of added last splice junction alignments: $summary_data_ref->{'number_of_added_last_SJ_alignments'}\n";
+		print $summary_handle "number of blastn calls: $summary_data_ref->{'number_of_blastn_calls'}\n";
+		print $summary_handle "number of nhmmer calls: $summary_data_ref->{'number_of_nhmmer_calls'}\n";
+		close $summary_handle;
+	}
+
+	sub print_with_timestamp {
+		my ($message) = @_;
+		my $time_value = localtime;
+		print "[$time_value] $message\n";
+	}
 }

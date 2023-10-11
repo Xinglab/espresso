@@ -21,6 +21,8 @@ UNSATISFIABLE_INPUT='unsatisfiable_input_file_path'
 
 def all_input(wildcards):
     inputs = dict()
+    inputs['c_summary'] = os.path.join('espresso_out', 'c_work_dir',
+                                       'espresso_c_summary.txt')
     inputs.update(run_espresso_q_output())
     if config['enable_visualization']:
         vis_files, vis_dirs = run_visualize_output_files_and_dirs()
@@ -424,6 +426,8 @@ rule run_espresso_s:
         samples_tsv=os.path.join('espresso_out', 'samples.tsv'),
         updated_tsv=os.path.join('espresso_out', 's_work_dir',
                                  'samples.tsv.updated'),
+        summary=os.path.join('espresso_out', 's_work_dir',
+                             'espresso_s_summary.txt'),
     log:
         out=os.path.join('espresso_out', 'run_espresso_s_log.out'),
         err=os.path.join('espresso_out', 'run_espresso_s_log.err'),
@@ -495,8 +499,8 @@ rule run_espresso_c:
         updated_tsv=os.path.join('espresso_out', 'c_work_dir',
                                  'samples.tsv.updated'),
     output:
-        done=touch(os.path.join('espresso_out', 'c_work_dir',
-                                'run_espresso_c_{updated_tsv_i}.done')),
+        summary=os.path.join('espresso_out', 'c_work_dir',
+                             '{updated_tsv_i}', '0', 'espresso_c_summary.txt'),
     log:
         out=os.path.join('espresso_out', 'c_work_dir',
                          'run_espresso_c_{updated_tsv_i}_log.out'),
@@ -535,10 +539,14 @@ def combine_c_for_q_input(wildcards):
             columns = line.strip().split('\t')
             c_index = columns[2]
             inputs[c_index] = os.path.join(
-                'espresso_out', 'c_work_dir',
-                'run_espresso_c_{}.done'.format(c_index))
+                'espresso_out', 'c_work_dir', str(c_index), '0',
+                'espresso_c_summary.txt')
 
     return inputs
+
+
+def combine_c_summary_files_input(wildcards):
+    return combine_c_for_q_input(wildcards)
 
 
 rule combine_c_for_q:
@@ -565,6 +573,29 @@ rule combine_c_for_q:
         ' 1> {log.out}'
         ' 2> {log.err}'
 
+rule combine_c_summary_files:
+    input:
+        unpack(combine_c_summary_files_input),
+    output:
+        summary=os.path.join('espresso_out', 'c_work_dir',
+                             'espresso_c_summary.txt'),
+    log:
+        out=os.path.join('espresso_out', 'combine_c_summary_files_log.out'),
+        err=os.path.join('espresso_out', 'combine_c_summary_files_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'combine_c_step_summary_files.py'),
+        c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
+    resources:
+        mem_mb=DEFAULT_MEM_MB,
+        time_hours=DEFAULT_TIME_HOURS,
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --c-base-work-dir {params.c_work_dir}'
+        ' --out-path {output.summary}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
 
 def run_espresso_q_output():
     outputs = dict()
@@ -572,6 +603,8 @@ def run_espresso_q_output():
                                             'samples_N2_R0_abundance.esp')
     outputs['updated_gtf'] = os.path.join('espresso_out', 'q_work_dir',
                                           'samples_N2_R0_updated.gtf')
+    outputs['summary'] = os.path.join('espresso_out', 'q_work_dir',
+                                          'espresso_q_summary.txt')
     if config['output_compatible_isoforms']:
         outputs['isoform_tsv'] = os.path.join(
             'espresso_out', 'q_work_dir', 'samples_N2_R0_compatible_isoform.tsv')

@@ -1,3 +1,9 @@
-/data/
-/logs/
-/out/
+/isoform_assignment_data/
+/isoform_assignment_logs/
+/isoform_assignment_out/
+/no_external_boundary_data/
+/no_external_boundary_logs/
+/no_external_boundary_out/
+/read_endpoints_data/
+/read_endpoints_logs/
+/read_endpoints_out/

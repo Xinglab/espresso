@@ -2,7 +2,7 @@ use strict;
 use threads;
 use Thread::Queue;
 use Getopt::Long;
-use Storable qw(store);
+use Storable qw(store retrieve);
 
 use File::Basename qw(dirname);
 use lib dirname(__FILE__);
@@ -12,8 +12,9 @@ use ESPRESSO_Q_Thread;
 my $version_number = ESPRESSO_Version::get_version_number();
 my $source_code_commit = ESPRESSO_Version::get_source_code_commit();
 my $version_string = "Q_$version_number";
-my ($help, $in_dir, $out_dir, $anno, $anno_C, $tsv_compt, $num_thread, $list_samples, $read_num_cutoff, $read_ratio_cutoff, $is_denovo, $max_iterate, $SJ_dist, $raw, $target_col_index, $tmp_output);
+my ($help, $in_dir, $out_dir, $anno, $anno_C, $tsv_compt, $num_thread, $list_samples, $read_num_cutoff, $read_ratio_cutoff, $max_iterate, $SJ_dist, $internal_boundary_limit, $raw, $target_col_index, $tmp_output, $allow_longer_terminal_exons);
 
+my $arguments_before_parsing = "@ARGV";
 Getopt::Long::GetOptions (
 
 	'list_samples|L=s'			=>	\$list_samples,
@@ -29,6 +30,8 @@ Getopt::Long::GetOptions (
 	'read_num_cutoff|N=i'		=>	\$read_num_cutoff,
 	'max_iterate|M=i'			=>	\$max_iterate,
 	'SJ_dist|S=i'				=>	\$SJ_dist,
+	'internal_boundary_limit=i'	=>	\$internal_boundary_limit,
+	'allow_longer_terminal_exons'	=>	\$allow_longer_terminal_exons,
 	'raw!'						=>	\$raw,
 	'target_col_index=i'		=>	\$target_col_index,
 	'tmp_output=s'				=>	\$tmp_output
@@ -68,6 +71,17 @@ Arguments:
     -R, --read_ratio_cutoff
           min perfect read ratio for all splice junctions of novel isoform
           (default: 0)
+    -S, --SJ_dist
+          max number of bases that an alignment endpoint can extend past the
+          start or end of a matched isoform
+          (default: 35)
+    --internal_boundary_limit
+          max number of bases that an alignment endpoint can extend into an
+          intron of a matched isoform
+          (default: 6)
+    --allow_longer_terminal_exons
+          allow an alignment to match an isoform even if the alignment endpoint
+          extends more than --SJ_dist past the start or end
 
 ";
 } elsif ( !defined($list_samples) ) {
@@ -99,6 +113,7 @@ Arguments:
 	$read_ratio_cutoff = 0 if !defined $read_ratio_cutoff;
 	$read_num_cutoff = 2 if !defined $read_num_cutoff;
 	$SJ_dist = 35 if !defined $SJ_dist;
+	$internal_boundary_limit = 6 if !defined $internal_boundary_limit;
 	$max_iterate = 100 if !defined $max_iterate;
 
 	$target_col_index = 7 if !defined $target_col_index;
@@ -136,6 +151,11 @@ Arguments:
 
 	my $keep_tmp = 1 if defined $tmp_output;
 
+	# The summary file will be written as a final step
+	my $summary_path = "$out_dir/espresso_q_summary.txt";
+	my %summary_data = ();
+	&initialize_summary_data(\%summary_data);
+	$summary_data{'perl_command'} = "$^X " . __FILE__ . " $arguments_before_parsing";
 
 	my %strand_digit = ('+' => 0, '-' => 1);
 	my %strand_symbol = ('0' => '+', '1' => '-', 'unknown' => 'unknown');
@@ -175,6 +195,13 @@ Arguments:
 			$isoform_exon{$current_isoform}{($line[3]-1).':'.$line[4]} = [$line[3]-1, $line[4], $line[0], $line[6]];
 
 		}
+		close ANNO;
+		my $num_annotated_isoforms = scalar(keys %isoform_info);
+		if ($num_annotated_isoforms == 0) {
+			die "No isoforms found in $anno";
+		}
+		$summary_data{'num_annotated_isoforms'} = $num_annotated_isoforms;
+
 		while (my ($isoform, $exon_start_ref) = each %anno_exons) {
 			my @exon_start_sort = sort {$a <=> $b} keys %{$exon_start_ref};
 			my $strand = $isoform_info{$isoform}[1];
@@ -194,6 +221,9 @@ Arguments:
 			}
 		}
 	}
+	$summary_data{'num_annotated_splice_junctions'} += (scalar keys %{$anno_SJ{$_}}) for keys %anno_SJ;
+	$summary_data{'num_annotated_splice_sites'} += (scalar keys %{$anno_SS{$_}}) for keys %anno_SS;
+
 	my (%isoform_SJ_complete, %anno_SJ_complete);
 	if (defined $anno_C) {
 		my (%anno_exons);
@@ -406,6 +436,8 @@ Arguments:
 	$arguments_shared_for_all_threads{'keep_tmp'} = $keep_tmp;
 	$arguments_shared_for_all_threads{'target_col_index'} = $target_col_index;
 	$arguments_shared_for_all_threads{'SJ_dist'} = $SJ_dist;
+	$arguments_shared_for_all_threads{'internal_boundary_limit'} = $internal_boundary_limit;
+	$arguments_shared_for_all_threads{'allow_longer_terminal_exons'} = $allow_longer_terminal_exons;
 	$arguments_shared_for_all_threads{'raw'} = $raw;
 	$arguments_shared_for_all_threads{'read_num_cutoff'} = $read_num_cutoff;
 	$arguments_shared_for_all_threads{'read_ratio_cutoff'} = $read_ratio_cutoff;
@@ -504,6 +536,9 @@ Arguments:
 			&append_lines_from_path_to_handle($chr_tsv_compt_path, $tsv_compt_handle);
 			unlink($chr_tsv_compt_path) if !defined $keep_tmp;
 		}
+		my $chr_summary_path = &ESPRESSO_Q_Thread::summary_path_for_chr($chr, $out_dir);
+		&merge_summary_results(\%summary_data, $chr_summary_path);
+		unlink($chr_summary_path) if !defined $keep_tmp;
 	}
 
 	close $gtf_handle;
@@ -513,6 +548,7 @@ Arguments:
 
 	&print_with_timestamp("cleaning up threads");
 	&cleanup_all_threads_and_exit_if_error(\@worker_threads, \@thread_input_queues);
+	&write_summary_file($summary_path, \%summary_data);
 	&print_with_timestamp("ESPRESSO finished quantification");
 
 	sub cleanup_finished_threads {
@@ -563,12 +599,14 @@ Arguments:
 		for my $thread_i (0 .. ($num_threads - 1)) {
 			if (!$worker_threads_ref->[$thread_i]->is_joinable()) {
 				&print_with_timestamp("Terminating worker $thread_i.");
-				$worker_threads_ref->[$thread_i]->kill('SIGTERM');
+				$worker_threads_ref->[$thread_i]->kill('TERM');
 				$any_error += 1;
 			}
 		}
 		# Give the threads a chance to exit
-		sleep $sleep_seconds;
+		if ($any_error) {
+			sleep $sleep_seconds;
+		}
 
 		for my $thread_i (0 .. ($num_threads - 1)) {
 			if ($worker_threads_ref->[$thread_i]->is_joinable()) {
@@ -589,6 +627,10 @@ Arguments:
 	# the process exists.
 	sub thread_work_loop {
 		my ($input_queue, $output_queue) = @{$_[0]};
+
+		# Allow the main thread to stop other threads with kill('TERM')
+		$SIG{'TERM'} = sub { threads->exit(); };
+
 		my $path_to_perl_executable = $^X;
 		my $path_to_code_file = dirname(__FILE__)."/ESPRESSO_Q_Thread.pm";
 		while (defined(my $work_details = $input_queue->dequeue())) {
@@ -619,5 +661,86 @@ Arguments:
 		my ($message) = @_;
 		my $time_value = localtime;
 		print "[$time_value] $message\n";
+	}
+
+	sub merge_summary_results {
+		my ($summary_data_ref, $thread_result_path) = @_;
+		my $thread_summary_ref = retrieve($thread_result_path);
+		while (my ($key, $value) = each %{$thread_summary_ref}) {
+			$summary_data_ref->{$key} += $value;
+		}
+	}
+
+	sub initialize_summary_data {
+		my $summary_data_ref = $_[0];
+		$summary_data_ref->{'num_annotated_isoforms'} = 0;
+		$summary_data_ref->{'num_annotated_splice_junctions'} = 0;
+		$summary_data_ref->{'num_annotated_splice_sites'} = 0;
+		$summary_data_ref->{'num_reads_assigned'} = 0;
+		$summary_data_ref->{'num_reads_not_assigned'} = 0;
+		$summary_data_ref->{'num_fsm_reads'} = 0;
+		$summary_data_ref->{'num_fsm_perfect_match_reads'} = 0;
+		$summary_data_ref->{'num_ism_reads'} = 0;
+		$summary_data_ref->{'num_nic_reads'} = 0;
+		$summary_data_ref->{'num_nnc_reads'} = 0;
+		$summary_data_ref->{'num_single_exon_reads'} = 0;
+		$summary_data_ref->{'num_reads_with_failed_SJ'} = 0;
+		$summary_data_ref->{'num_fsm_chains'} = 0;
+		$summary_data_ref->{'num_ism_chains'} = 0;
+		$summary_data_ref->{'num_nic_chains'} = 0;
+		$summary_data_ref->{'num_validated_nic_chains'} = 0;
+		$summary_data_ref->{'num_nnc_chains'} = 0;
+		$summary_data_ref->{'num_validated_nnc_chains'} = 0;
+		$summary_data_ref->{'num_chains_with_failed_SJ'} = 0;
+		$summary_data_ref->{'total_fsm_abundance'} = 0;
+		$summary_data_ref->{'total_novel_ism_abundance'} = 0;
+		$summary_data_ref->{'total_nic_abundance'} = 0;
+		$summary_data_ref->{'total_nnc_abundance'} = 0;
+		$summary_data_ref->{'total_single_exon_abundance'} = 0;
+		$summary_data_ref->{'num_fsm_isoforms_detected'} = 0;
+		$summary_data_ref->{'num_novel_ism_isoforms_detected'} = 0;
+		$summary_data_ref->{'num_nic_isoforms_detected'} = 0;
+		$summary_data_ref->{'num_nnc_isoforms_detected'} = 0;
+		$summary_data_ref->{'num_single_exon_isoforms_detected'} = 0;
+		$summary_data_ref->{'num_internal_exon_boundary_check_fails'} = 0;
+		$summary_data_ref->{'num_terminal_exon_boundary_check_fails'} = 0;
+	}
+
+	sub write_summary_file {
+		my ($summary_path, $summary_data_ref) = @_;
+		open(my $summary_handle, '>', $summary_path) or die "cannot write $summary_path: $!";
+		print $summary_handle "$summary_data_ref->{'perl_command'}\n";
+		print $summary_handle "number of isoforms in input annotation: $summary_data_ref->{'num_annotated_isoforms'}\n";
+		print $summary_handle "number of splice junctions in input annotation: $summary_data_ref->{'num_annotated_splice_junctions'}\n";
+		print $summary_handle "number of splice sites in input annotation: $summary_data_ref->{'num_annotated_splice_sites'}\n";
+		print $summary_handle "number of reads assigned: $summary_data_ref->{'num_reads_assigned'}\n";
+		print $summary_handle "number of reads not assigned: $summary_data_ref->{'num_reads_not_assigned'}\n";
+		print $summary_handle "number of full splice match reads: $summary_data_ref->{'num_fsm_reads'}\n";
+		print $summary_handle "number of FSM reads with 'perfect match' endpoints: $summary_data_ref->{'num_fsm_perfect_match_reads'}\n";
+		print $summary_handle "number of incomplete splice match reads: $summary_data_ref->{'num_ism_reads'}\n";
+		print $summary_handle "number of novel in catalog reads: $summary_data_ref->{'num_nic_reads'}\n";
+		print $summary_handle "number of novel not in catalog reads: $summary_data_ref->{'num_nnc_reads'}\n";
+		print $summary_handle "number of single exon reads: $summary_data_ref->{'num_single_exon_reads'}\n";
+		print $summary_handle "number of reads with a failed splice junction: $summary_data_ref->{'num_reads_with_failed_SJ'}\n";
+		print $summary_handle "number of FSM splice junction chains: $summary_data_ref->{'num_fsm_chains'}\n";
+		print $summary_handle "number of ISM splice junction chains: $summary_data_ref->{'num_ism_chains'}\n";
+		print $summary_handle "number of NIC splice junction chains: $summary_data_ref->{'num_nic_chains'}\n";
+		print $summary_handle "number of validated NIC chains: $summary_data_ref->{'num_validated_nic_chains'}\n";
+		print $summary_handle "number of NNC splice junction chains: $summary_data_ref->{'num_nnc_chains'}\n";
+		print $summary_handle "number of validated NNC chains: $summary_data_ref->{'num_validated_nnc_chains'}\n";
+		print $summary_handle "number of splice junction chains with a failed junction: $summary_data_ref->{'num_chains_with_failed_SJ'}\n";
+		print $summary_handle "total FSM abundance: $summary_data_ref->{'total_fsm_abundance'}\n";
+		print $summary_handle "total novel ISM abundance: $summary_data_ref->{'total_novel_ism_abundance'}\n";
+		print $summary_handle "total NIC abundance: $summary_data_ref->{'total_nic_abundance'}\n";
+		print $summary_handle "total NNC abundance: $summary_data_ref->{'total_nnc_abundance'}\n";
+		print $summary_handle "total single exon abundance: $summary_data_ref->{'total_single_exon_abundance'}\n";
+		print $summary_handle "number of detected FSM isoforms: $summary_data_ref->{'num_fsm_isoforms_detected'}\n";
+		print $summary_handle "number of detected novel ISM isoforms: $summary_data_ref->{'num_novel_ism_isoforms_detected'}\n";
+		print $summary_handle "number of detected NIC isoforms: $summary_data_ref->{'num_nic_isoforms_detected'}\n";
+		print $summary_handle "number of detected NNC isoforms: $summary_data_ref->{'num_nnc_isoforms_detected'}\n";
+		print $summary_handle "number of detected single exon isoforms: $summary_data_ref->{'num_single_exon_isoforms_detected'}\n";
+		print $summary_handle "number of internal exon boundary check failures: $summary_data_ref->{'num_internal_exon_boundary_check_fails'}\n";
+		print $summary_handle "number of terminal exon boundary check failures: $summary_data_ref->{'num_terminal_exon_boundary_check_fails'}\n";
+		close $summary_handle;
 	}
 }

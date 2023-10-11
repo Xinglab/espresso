@@ -6,6 +6,7 @@ import tests.high_confidence_sjs.test as high_confidence_sjs_test
 import tests.isoform_assignment.test as isoform_assignment_test
 import tests.read_filters.test as read_filters_test
 import tests.sirv_example.test as sirv_example_test
+import tests.sorted_input.test as sorted_input_test
 
 
 def build_test_suite():
@@ -17,6 +18,7 @@ def build_test_suite():
     suite.addTest(loader.loadTestsFromModule(isoform_assignment_test))
     suite.addTest(loader.loadTestsFromModule(read_filters_test))
     suite.addTest(loader.loadTestsFromModule(sirv_example_test))
+    suite.addTest(loader.loadTestsFromModule(sorted_input_test))
     return suite
 
 

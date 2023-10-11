@@ -198,9 +198,12 @@ def write_sam_from_alignments(sam_path,
                 alignment.sequence = '*'
                 alignment.quality = '*'
             else:
-                alignment.set_sequence_from_cigar_and_chr_seq(
-                    chrom_details['seq'])
-                alignment.set_default_quality_from_sequence()
+                if alignment.sequence is None:
+                    alignment.set_sequence_from_cigar_and_chr_seq(
+                        chrom_details['seq'])
+
+                if alignment.quality is None:
+                    alignment.set_default_quality_from_sequence()
             if use_m_cigar_op:
                 cigar_string = (
                     alignment.cigar.str_with_match_and_mismatch_as_m())
@@ -358,7 +361,7 @@ def add_mismatch_in_exon(alignment,
                          mismatch_len=1):
     exon_op_i = _get_exon_i_from_cigar(alignment.cigar, exon_i)
     existing_op = alignment.cigar.operations[exon_op_i]
-    if existing_op.num <= (mismatch_len + offset_from_start):
+    if existing_op.num < (mismatch_len + offset_from_start):
         raise Exception('Cigar operation not long enough to add mismatch of'
                         ' length {} offset by {} in {}'.format(
                             mismatch_len, offset_from_start, existing_op))
@@ -369,9 +372,12 @@ def add_mismatch_in_exon(alignment,
         alignment.cigar.operations.insert(exon_op_i, before_op)
         exon_op_i += 1
 
-    existing_op.num -= mismatch_len
-    mismatch_op = CigarOp(mismatch_len, 'X')
-    alignment.cigar.operations.insert(exon_op_i, mismatch_op)
+    if existing_op.num == mismatch_len:
+        existing_op.char = 'X'
+    else:
+        existing_op.num -= mismatch_len
+        mismatch_op = CigarOp(mismatch_len, 'X')
+        alignment.cigar.operations.insert(exon_op_i, mismatch_op)
 
 
 def add_deletion_in_exon(alignment,
@@ -400,6 +406,37 @@ def add_deletion_in_exon(alignment,
     alignment.cigar.operations.insert(exon_match_op_i + 2, new_match_op)
 
 
+def add_insertion_in_exon(alignment,
+                          exon_i=0,
+                          offset_from_start=1,
+                          insertion_length=1):
+    if exon_i == 0:
+        junction_op_i = -1
+    else:
+        junction_op_i = _get_junction_i_from_cigar(alignment.cigar, exon_i - 1)
+
+    exon_match_op_i = junction_op_i + 1
+    while exon_match_op_i < len(alignment.cigar.operations):
+        if alignment.cigar.operations[exon_match_op_i].char == 'M':
+            break
+
+        exon_match_op_i += 1
+
+    exon_match_op = alignment.cigar.operations[exon_match_op_i]
+    orig_match_len = exon_match_op.num
+    exon_match_op.num = offset_from_start
+    new_ins_op = CigarOp(insertion_length, 'I')
+    new_match_length = orig_match_len - offset_from_start
+    new_match_op = CigarOp(new_match_length, 'M')
+    alignment.cigar.operations.insert(exon_match_op_i + 1, new_ins_op)
+    alignment.cigar.operations.insert(exon_match_op_i + 2, new_match_op)
+
+
+def remove_junction_operation(alignment, junction_i=0):
+    junction_op_i = _get_junction_i_from_cigar(alignment.cigar, junction_i)
+    return alignment.cigar.operations.pop(junction_op_i)
+
+
 def adjust_start_of_junction(alignment, junction_i=0, offset=1):
     junction_op_i = _get_junction_i_from_cigar(alignment.cigar, junction_i)
     junction_op = alignment.cigar.operations[junction_op_i]
@@ -415,8 +452,51 @@ def trim_alignment_start(alignment, num_nt):
     alignment.start += num_nt
 
 
+def extend_alignment_start(alignment, num_nt):
+    alignment.cigar.operations[0].num += num_nt
+    alignment.start -= num_nt
+
+
 def trim_alignment_end(alignment, num_nt):
     alignment.cigar.operations[-1].num -= num_nt
+
+
+def extend_alignment_end(alignment, num_nt):
+    alignment.cigar.operations[-1].num += num_nt
+
+
+def add_soft_clipping_at_alignment_start(alignment, num_nt):
+    clip_op = CigarOp(num_nt, 'S')
+    alignment.cigar.operations.insert(0, clip_op)
+
+
+def add_soft_clipping_at_alignment_end(alignment, num_nt):
+    clip_op = CigarOp(num_nt, 'S')
+    alignment.cigar.operations.append(clip_op)
+
+
+def trim_exon_start(exon, amount):
+    exon.start += amount
+    exon.sequence = exon.sequence[amount:]
+
+
+def extend_exon_start(exon, amount, chrom_sequence):
+    orig_start = exon.start
+    exon.start -= amount
+    extra_sequence = chrom_sequence[exon.start:orig_start]
+    exon.sequence = extra_sequence + exon.sequence
+
+
+def trim_exon_end(exon, amount):
+    exon.end -= amount
+    exon.sequence = exon.sequence[:-amount]
+
+
+def extend_exon_end(exon, amount, chrom_sequence):
+    orig_end = exon.end
+    exon.end += amount
+    extra_sequence = chrom_sequence[orig_end + 1:exon.end + 1]
+    exon.sequence += extra_sequence
 
 
 def append_copies(values, to_copy, num_copies):
@@ -429,6 +509,13 @@ def parse_float_with_NA(float_str):
         return math.nan
 
     return float(float_str)
+
+
+def parse_int_with_NA(int_str):
+    if int_str == 'NA':
+        return None
+
+    return int(int_str)
 
 
 class Cigar(object):
@@ -484,6 +571,10 @@ class Cigar(object):
     def add_skip(self, length):
         skip = CigarOp(length, 'N')
         self.operations.append(skip)
+
+    def add_hard_clip(self, length):
+        clip = CigarOp(length, 'H')
+        self.operations.append(clip)
 
 
 class CigarOp(object):
@@ -956,6 +1047,9 @@ class BaseTest(unittest.TestCase):
         return {'isoforms': isoforms, 'index': index}
 
     def _parse_sj_id_string(self, id_str):
+        if id_str == 'NA':
+            return {'chr': None, 'start': None, 'end': None, 'strand': None}
+
         parts = id_str.split(':')
         sj_chr = parts[0]
         sj_start = int(parts[1])
@@ -1032,7 +1126,7 @@ class BaseTest(unittest.TestCase):
         parsed = dict()
         with open(read_final_path, 'rt') as handle:
             for line in handle:
-                columns = line.strip().split('\t')
+                columns = line.rstrip('\n').split('\t')
                 read_id = columns[0]
                 read_details = parsed.get(read_id)
                 if not read_details:
@@ -1063,14 +1157,23 @@ class BaseTest(unittest.TestCase):
                         read_sjs = list()
                         read_details['SJs'] = read_sjs
 
-                    junction_i = int(columns[2]) - 1  # 0-based
-                    while len(read_sjs) <= junction_i:
-                        read_sjs.append(None)
+                    is_first_junction = False
+                    is_last_junction = False
+                    junction_i = int(columns[2])
+                    if junction_i == 0:
+                        is_first_junction = True
+                    elif junction_i == -1:
+                        is_last_junction = True
+                    else:
+                        junction_i -= 1
+                        while len(read_sjs) <= junction_i:
+                            read_sjs.append(None)
 
                     sj_id_str = columns[3]
                     sj_details = self._parse_sj_id_string(sj_id_str)
-                    read_length_used_up_to_sj = int(columns[4])
-                    read_length_remaining_after_sj = int(columns[5])
+                    read_length_used_up_to_sj = parse_int_with_NA(columns[4])
+                    read_length_remaining_after_sj = parse_int_with_NA(
+                        columns[5])
                     corrected_status = columns[6]
                     corrected_id_str = columns[7]
                     if corrected_id_str == 'NA':
@@ -1087,7 +1190,7 @@ class BaseTest(unittest.TestCase):
                     corrected_score = parse_float_with_NA(columns[10])
                     is_annotated = columns[11] == 'yes'
                     corrected_is_annotated = columns[12] == 'yes'
-                    read_sjs[junction_i] = {
+                    read_dict = {
                         'id_str': sj_id_str,
                         'chr': sj_details['chr'],
                         'start': sj_details['start'],
@@ -1109,6 +1212,12 @@ class BaseTest(unittest.TestCase):
                         'is_annotated': is_annotated,
                         'corrected_is_annotated': corrected_is_annotated,
                     }
+                    if is_first_junction:
+                        read_details['added_first'] = read_dict
+                    elif is_last_junction:
+                        read_details['added_last'] = read_dict
+                    else:
+                        read_sjs[junction_i] = read_dict
                 elif feature in ['start', 'end']:
                     # columns[2] == 'NA'
                     position = int(columns[3]) - 1  # 0-based
@@ -1136,6 +1245,28 @@ class BaseTest(unittest.TestCase):
                         feature, read_final_path))
 
         return parsed
+
+    def _parse_compat_isoforms(self, compat_isoforms_path):
+        headers = [
+            'read_id', 'sample_name', 'read_classification',
+            'compatible_isoforms'
+        ]
+        expected_classes = ['NIC', 'NNC', 'NCD', 'ISM', 'FSM', 'single-exon']
+        rows = dict()
+        with open(compat_isoforms_path, 'rt') as handle:
+            for line in handle:
+                columns = line.strip().split('\t')
+                self.assertEqual(len(columns), len(headers))
+                row = dict(zip(headers, columns))
+                row['compatible_isoforms'] = (
+                    row['compatible_isoforms'].split(','))
+                row['compatible_isoforms'] = [
+                    x for x in row['compatible_isoforms'] if x
+                ]
+                self.assertIn(row['read_classification'], expected_classes)
+                rows[row['read_id']] = row
+
+        return rows
 
     def _get_strand_from_int_str(self, int_str):
         if int_str == '0':
@@ -1203,3 +1334,27 @@ class BaseTest(unittest.TestCase):
                                        expected['abundance'][name],
                                        msg='transcript: {}, sample: {}'.format(
                                            transcript_id, name))
+
+    def _check_compat_isoforms(self, expected_reads, actuals):
+        for read_i, expected in enumerate(expected_reads):
+            read_id = expected.get('read_id')
+            if read_id is None:
+                read_id = 'read-{}'.format(read_i)
+
+            self.assertIn(read_id, actuals)
+            actual = actuals[read_id]
+            expected_class = expected.get('class')
+            if expected_class:
+                self.assertEqual(actual['read_classification'],
+                                 expected_class,
+                                 msg=actual)
+
+            expected_isoforms = expected.get('isoforms')
+            if expected_isoforms:
+                sorted_expected = sorted(expected_isoforms)
+                sorted_actual = sorted(actual['compatible_isoforms'])
+                self.assertEqual(sorted_actual, sorted_expected)
+
+            expected_sample = expected.get('sample')
+            if expected_sample:
+                self.assertEqual(actual['sample_name'], expected_sample)
