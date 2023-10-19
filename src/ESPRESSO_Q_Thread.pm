@@ -1401,17 +1401,20 @@ sub process_results_for_chr {
 		}
 
 		my %single_exon_isoform_read_count;
-		my @single_exon_isoforms_group_sort = sort {
-			my $a_info = $single_exon_isoform_end_ref->{$a};
-			my $a_start = $a_info->{'0'};
-			my $a_end = $a_info->{'1'};
-			my $a_length = $a_end - $a_start;
-			my $b_info = $single_exon_isoform_end_ref->{$b};
-			my $b_start = $b_info->{'0'};
-			my $b_end = $b_info->{'1'};
-			my $b_length = $b_end - $b_start;
-			$a_length <=> $b_length;
-		} @{$single_exon_isoforms_by_group{$n}};
+		my @single_exon_isoforms_group_sort = ();
+		if (exists $single_exon_isoforms_by_group{$n}) {
+			@single_exon_isoforms_group_sort = sort {
+				my $a_info = $single_exon_isoform_end_ref->{$a};
+				my $a_start = $a_info->{'0'};
+				my $a_end = $a_info->{'1'};
+				my $a_length = $a_end - $a_start;
+				my $b_info = $single_exon_isoform_end_ref->{$b};
+				my $b_start = $b_info->{'0'};
+				my $b_end = $b_info->{'1'};
+				my $b_length = $b_end - $b_start;
+				$a_length <=> $b_length;
+			} @{$single_exon_isoforms_by_group{$n}};
+		}
 
 		for my $single_exon_isoform(@single_exon_isoforms_group_sort){
 			$single_exon_isoform_read_count{$single_exon_isoform}{$_} = [0,0,0] for @{$samples_sort_ref}; #direct_assign, last_EM_assign, current_EM_assign
