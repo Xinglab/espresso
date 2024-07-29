@@ -3,6 +3,8 @@
 /conda_env/
 /espresso_out/
 /fastq_dir/
+/parasail/
 /references/
+/scripts/libparasail.so
 /visualization/
 __pycache__/

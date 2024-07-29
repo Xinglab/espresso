@@ -1,0 +1,55 @@
+#!/bin/bash
+
+function set_script_dir() {
+  local ORIG_DIR="$(pwd)" || return 1
+
+  local REL_SCRIPT_DIR="$(dirname ${BASH_SOURCE[0]})" || return 1
+  cd "${REL_SCRIPT_DIR}" || return 1
+  SCRIPT_DIR="$(pwd)" || return 1
+  cd "${ORIG_DIR}" || return 1
+}
+
+function build_library() {
+  local ORIG_DIR="$(pwd)" || return 1
+  cd "${SCRIPT_DIR}" || return 1
+
+  local URI='https://github.com/jeffdaily/parasail.git'
+  local VERSION='v2.6.2'
+  git clone "${URI}" || return 1
+  cd parasail || return 1
+  git checkout "${VERSION}" || return 1
+  mkdir build || return 1
+  cd build || return 1
+  cmake .. || return 1
+  make || return 1
+
+  cd "${ORIG_DIR}" || return 1
+}
+
+function build_module() {
+  local ORIG_DIR="$(pwd)" || return 1
+  cd "${SCRIPT_DIR}" || return 1
+
+  local PARASAIL_BUILD_SO_PATH="./parasail/build/libparasail.so"
+  local PARASAIL_HEADER="./parasail/parasail.h"
+  cp "${PARASAIL_BUILD_SO_PATH}" ./ || return 1
+  cp "${PARASAIL_HEADER}" ./ || return 1
+
+  perl Makefile.PL || return 1
+  make || return 1
+  cp libparasail.so ./blib/lib/ || return 1
+  make test || return 1
+  cp ./blib/lib/Parasail.pm ../ || return 1
+  cp ./blib/arch/auto/Parasail/Parasail.so ../ || return 1
+  cp ./libparasail.so ../ || return 1
+
+  cd "${ORIG_DIR}" || return 1
+}
+
+function main() {
+  set_script_dir || return 1
+  build_library || return 1
+  build_module || return 1
+}
+
+main "$@"

@@ -1,6 +1,7 @@
 import argparse
 import os.path
 import subprocess
+import sys
 import tempfile
 
 
@@ -36,16 +37,25 @@ def parse_args():
         default='2G',
         help='how much memory "sort" is allowed to use. Specified as {num_gb}G'
     )
-    parser.add_argument(
-        '--float-diff-threshold',
-        type=float,
-        default=0.1,
-        help='how much a float value must differ to be reported')
     parser.add_argument('--tmp-dir',
                         required=True,
                         help='where to write temporary files')
+    parser.add_argument('--out-abun-tsv',
+                        required=True,
+                        help='where to write compared abundance')
+    parser.add_argument('--out-compat-tsv',
+                        required=False,
+                        help='where to write compared compatible isoforms')
 
     return parser.parse_args()
+
+
+def write_tsv_line(handle, columns):
+    handle.write('{}\n'.format('\t'.join(columns)))
+
+
+def read_tsv_line(line):
+    return line.rstrip('\n').split('\t')
 
 
 def sort_file(orig, output, sort_memory_buffer_size, temp_dir):
@@ -63,45 +73,35 @@ def sort_file(orig, output, sort_memory_buffer_size, temp_dir):
     subprocess.run(sort_command, env=env, check=True)
 
 
-def compare_abundance(abun_a, abun_b, gtf_a, gtf_b, float_diff_threshold):
+def compare_abundance(abun_a, abun_b, gtf_a, gtf_b, out_handle):
     with open(abun_a, 'rt') as abun_a_handle:
         with open(abun_b, 'rt') as abun_b_handle:
             with open(gtf_a, 'rt') as gtf_a_handle:
                 with open(gtf_b, 'rt') as gtf_b_handle:
                     compare_abundance_with_handles(abun_a_handle,
                                                    abun_b_handle, gtf_a_handle,
-                                                   gtf_b_handle,
-                                                   float_diff_threshold)
+                                                   gtf_b_handle, out_handle)
 
 
-def compare_matched_parsed_abundance_lines(parsed_a, parsed_b,
-                                           float_diff_threshold):
-    for i, a_val in enumerate(parsed_a['sample_values']):
-        b_val = parsed_b['sample_values'][i]
-        diff = a_val - b_val
-        if abs(diff) > float_diff_threshold:
-            print('transcript: {}, value_i: {}, a: {}, b: {}'.format(
-                parsed_a['transcript_id'], i, a_val, b_val))
+def output_abundance(parsed_a, parsed_b, sample_names, out_handle):
+    num_samples = len(sample_names)
+    id_a = None
+    id_b = None
+    values_a = [None] * num_samples
+    values_b = [None] * num_samples
+    if parsed_a:
+        id_a = parsed_a['transcript_id']
+        values_a = parsed_a['sample_values']
+    if parsed_b:
+        id_b = parsed_b['transcript_id']
+        values_b = parsed_b['sample_values']
 
-    if len(parsed_a['sample_values']) != len(parsed_b['sample_values']):
-        print('transcript: {}, a_values: {}, b_values: {}'.format(
-            parsed_a['transcript_id'], parsed_a['sample_values'],
-            parsed_b['sample_values']))
+    columns = [id_a, id_b]
+    for i, value_a in enumerate(values_a):
+        value_b = values_b[i]
+        columns.extend([value_a, value_b])
 
-
-def compare_unmatched_parsed_abundance_line(parsed, is_a, float_diff_threshold):
-    for i, val in enumerate(parsed['sample_values']):
-        if is_a:
-            a_val = val
-            b_val = 0
-        else:
-            a_val = 0
-            b_val = val
-
-        diff = a_val - b_val
-        if abs(diff) > float_diff_threshold:
-            print('transcript: {}, value_i: {}, a: {}, b: {}'.format(
-                parsed['transcript_id'], i, a_val, b_val))
+    write_tsv_line(out_handle, [str(x) for x in columns])
 
 
 def read_novel_defs(gtf_handle, novel_chr):
@@ -109,8 +109,13 @@ def read_novel_defs(gtf_handle, novel_chr):
     offset = gtf_handle.tell()
     while True:
         line = gtf_handle.readline()
-        columns = line.strip().split('\t')
+        if not line:
+            break
+
+        columns = read_tsv_line(line)
         chr_name = columns[0]
+        if chr_name < novel_chr:
+            continue
         if chr_name != novel_chr:
             gtf_handle.seek(offset)
             break
@@ -171,63 +176,194 @@ def make_abuns_by_coords(abuns, defs):
 
 
 def compare_novels(novel_defs_a, novel_defs_b, novel_abuns_a, novel_abuns_b,
-                   float_diff_threshold):
+                   sample_names, out_handle):
     abuns_by_coords_a = make_abuns_by_coords(novel_abuns_a, novel_defs_a)
     abuns_by_coords_b = make_abuns_by_coords(novel_abuns_b, novel_defs_b)
     for coords_a, abun_a in abuns_by_coords_a.items():
         abun_b = abuns_by_coords_b.get(coords_a)
         if not abun_b:
-            print('extra a transcript: {}'.format(abun_a['transcript_id']))
-            compare_unmatched_parsed_abundance_line(abun_a, True, float_diff_threshold)
+            output_abundance(abun_a, None, sample_names, out_handle)
         else:
             del abuns_by_coords_b[coords_a]
-            compare_matched_parsed_abundance_lines(abun_a, abun_b,
-                                                   float_diff_threshold)
+            output_abundance(abun_a, abun_b, sample_names, out_handle)
 
     for abun_b in abuns_by_coords_b.values():
-        print('extra b transcript: {}'.format(abun_b['transcript_id']))
-        compare_unmatched_parsed_abundance_line(abun_b, False, float_diff_threshold)
+        output_abundance(None, abun_b, sample_names, out_handle)
 
 
-def print_extra_novels(name, novel_abuns, float_diff_threshold):
-    is_a = name == 'a'
+def output_extra_novels(novel_abuns, is_a, sample_names, out_handle):
     for abun in novel_abuns:
-        print('extra {} transcript: {}'.format(name, abun['transcript_id']))
-        compare_unmatched_parsed_abundance_line(abun, is_a, float_diff_threshold)
+        if is_a:
+            output_abundance(abun, None, sample_names, out_handle)
+        else:
+            output_abundance(None, abun, sample_names, out_handle)
+
+
+def read_samples_from_header(handle):
+    line = handle.readline()
+    headers = read_tsv_line(line)
+    samples = headers[3:]
+    return samples
+
+
+def write_compat_headers(out_handle):
+    columns = ['read_id', 'sample', 'compat_a', 'compat_b', 'both']
+    write_tsv_line(out_handle, columns)
+
+
+def output_annotated_compat_read(parsed_a, parsed_b, out_handle):
+    output_novel_compat_read(parsed_a, parsed_b, None, None, out_handle)
+
+
+def process_novel_compat_read_info(parsed, novel_defs):
+    result = {
+        'read_id': None,
+        'sample': None,
+        'isoforms': None,
+        'coords_or_isoforms': None,
+    }
+    if not parsed:
+        return result
+
+    result['read_id'] = parsed['read_id']
+    result['sample'] = parsed['sample_name']
+    isoforms = parsed['compat_isoforms']
+    if novel_defs:
+        coords_or_isos = convert_novel_isoforms_to_coords(isoforms, novel_defs)
+        combined_sorted = sorted(zip(isoforms, coords_or_isos),
+                                 key=lambda pair: pair[1])
+        result['isoforms'] = [pair[0] for pair in combined_sorted]
+        result['coords_or_isoforms'] = [pair[1] for pair in combined_sorted]
+    else:
+        result['isoforms'] = isoforms
+        result['coords_or_isoforms'] = isoforms
+
+    return result
+
+
+def get_shared_or_different_compat_isoforms(orig_a, converted_a, orig_b,
+                                            converted_b, only_a, only_b, both):
+    a_i = 0
+    b_i = 0
+    len_a = len(converted_a)
+    len_b = len(converted_b)
+    while a_i < len_a and b_i < len_b:
+        iso_a = converted_a[a_i]
+        iso_b = converted_b[b_i]
+        if iso_a < iso_b:
+            only_a.append([orig_a[a_i], iso_a])
+            a_i += 1
+        elif iso_b < iso_a:
+            only_b.append([orig_b[b_i], iso_b])
+            b_i += 1
+        else:
+            both.append(orig_a[a_i])
+            a_i += 1
+            b_i += 1
+
+    while a_i < len_a:
+        only_a.append([orig_a[a_i], converted_a[a_i]])
+        a_i += 1
+
+    while b_i < len_b:
+        only_b.append([orig_b[b_i], converted_b[b_i]])
+        b_i += 1
+
+
+def output_novel_compat_read(parsed_a, parsed_b, novel_defs_a, novel_defs_b,
+                             out_handle):
+    details_a = process_novel_compat_read_info(parsed_a, novel_defs_a)
+    details_b = process_novel_compat_read_info(parsed_b, novel_defs_b)
+
+    # Each element of only_a (and only_b) is a list.
+    # The 1st element of each inner list will be the isoform ID.
+    # For novel isoforms the 2nd element will be the coordinates.
+    only_a = list()
+    only_b = list()
+    both = list()
+    orig_a = details_a['isoforms']
+    converted_a = details_a['coords_or_isoforms']
+    orig_b = details_b['isoforms']
+    converted_b = details_b['coords_or_isoforms']
+    if orig_a and orig_b:
+        read_id = details_a['read_id']
+        sample = details_a['sample']
+        if details_a['sample'] != details_b['sample']:
+            print('different samples for {}: {}, {}'.format(
+                read_id, details_a['sample'], details_b['sample']),
+                  file=sys.stderr)
+
+        get_shared_or_different_compat_isoforms(orig_a, converted_a, orig_b,
+                                                converted_b, only_a, only_b,
+                                                both)
+    elif orig_a:
+        read_id = details_a['read_id']
+        sample = details_a['sample']
+        only_a = [[x] for x in orig_a]
+    else:
+        read_id = details_b['read_id']
+        sample = details_b['sample']
+        only_b = [[x] for x in orig_b]
+
+    if not (only_a or only_b):
+        return
+
+    only_a_str = format_isoform_list_for_compat_output(only_a)
+    only_b_str = format_isoform_list_for_compat_output(only_b)
+    both_str = format_isoform_list_for_compat_output(both)
+    columns = [read_id, sample, only_a_str, only_b_str, both_str]
+    write_tsv_line(out_handle, columns)
+
+
+def format_isoform_list_for_compat_output(isoforms):
+    if not isoforms:
+        return 'None'
+
+    final_parts = list()
+    for isoform_or_list in isoforms:
+        if isinstance(isoform_or_list, list):
+            if (((len(isoform_or_list) == 2)
+                 and (isoform_or_list[0] == isoform_or_list[1]))):
+                final_parts.append(isoform_or_list[0])
+            else:
+                final_parts.append('|'.join(isoform_or_list))
+        else:
+            final_parts.append(isoform_or_list)
+
+    return ';'.join(final_parts)
+
+
+def write_abundance_headers(out_handle, samples):
+    columns = ['id_a', 'id_b']
+    for sample in samples:
+        columns.append('{}_a'.format(sample))
+        columns.append('{}_b'.format(sample))
+
+    write_tsv_line(out_handle, columns)
 
 
 def compare_abundance_with_handles(abun_a_handle, abun_b_handle, gtf_a_handle,
-                                   gtf_b_handle, float_diff_threshold):
+                                   gtf_b_handle, out_handle):
+    samples_a = read_samples_from_header(abun_a_handle)
+    samples_b = read_samples_from_header(abun_b_handle)
+    if samples_a != samples_b:
+        print('sample names differ: {}, {}'.format(samples_a, samples_b),
+              file=sys.stderr)
+
+    write_abundance_headers(out_handle, samples_a)
+
     line_a, line_b = compare_annotated_abundance(abun_a_handle, abun_b_handle,
-                                                 float_diff_threshold)
+                                                 samples_a, out_handle)
     if not (line_a or line_b):
         # processed all lines
         return
 
-    if not line_a:
-        while line_b:
-            parsed_b = parse_abundance_line(line_b)
-            print('extra b transcript: {}'.format(parsed_b['transcript_id']))
-            compare_unmatched_parsed_abundance_line(parsed_b, False, float_diff_threshold)
-            line_b = abun_b_handle.readline()
-
-        return
-
-    if not line_b:
-        while line_a:
-            parsed_a = parse_abundance_line(line_a)
-            print('extra a transcript: {}'.format(parsed_a['transcript_id']))
-            compare_unmatched_parsed_abundance_line(parsed_a, True, float_diff_threshold)
-            line_a = abun_a_handle.readline()
-
-        return
-
     compare_novel_abundance(line_a, line_b, abun_a_handle, abun_b_handle,
-                            gtf_a_handle, gtf_b_handle, float_diff_threshold)
+                            gtf_a_handle, gtf_b_handle, samples_a, out_handle)
 
 
-def compare_annotated_abundance(abun_a_handle, abun_b_handle,
-                                float_diff_threshold):
+def compare_annotated_abundance(abun_a_handle, abun_b_handle, sample_names,
+                                out_handle):
     line_a = abun_a_handle.readline()
     line_b = abun_b_handle.readline()
     while line_a and line_b:
@@ -238,125 +374,158 @@ def compare_annotated_abundance(abun_a_handle, abun_b_handle,
                 break
 
             if parsed_a['is_novel']:
-                print('extra b transcript: {}'.format(
-                    parsed_b['transcript_id']))
-                compare_unmatched_parsed_abundance_line(parsed_b, False, float_diff_threshold)
+                output_abundance(None, parsed_b, sample_names, out_handle)
                 line_b = abun_b_handle.readline()
 
             if parsed_b['is_novel']:
-                print('extra a transcript: {}'.format(
-                    parsed_a['transcript_id']))
-                compare_unmatched_parsed_abundance_line(parsed_a, True, float_diff_threshold)
+                output_abundance(parsed_a, None, sample_names, out_handle)
                 line_a = abun_a_handle.readline()
-        elif ((parsed_a['transcript_id'] == parsed_b['transcript_id'])
-              and (parsed_a['transcript_name'] == parsed_b['transcript_name'])
-              and (parsed_a['gene_id'] == parsed_b['gene_id'])):
-            compare_matched_parsed_abundance_lines(parsed_a, parsed_b,
-                                                   float_diff_threshold)
+        elif parsed_a['transcript_id'] == parsed_b['transcript_id']:
+            if (((parsed_a['transcript_name'] != parsed_b['transcript_name'])
+                 or (parsed_a['gene_id'] != parsed_b['gene_id']))):
+                print(
+                    'differing transcript info for id: {} {} {} {} {}'.format(
+                        parsed_a['transcript_id'], parsed_a['transcript_name'],
+                        parsed_b['transcript_name'], parsed_a['gene_id'],
+                        parsed_b['gene_id']),
+                    file=sys.stderr)
+
+            output_abundance(parsed_a, parsed_b, sample_names, out_handle)
             line_a = abun_a_handle.readline()
             line_b = abun_b_handle.readline()
         else:
             id_a = parsed_a['transcript_id']
             id_b = parsed_b['transcript_id']
             if id_a < id_b:
-                print('extra a transcript: {}'.format(id_a))
-                compare_unmatched_parsed_abundance_line(parsed_a, True, float_diff_threshold)
+                output_abundance(parsed_a, None, sample_names, out_handle)
                 line_a = abun_a_handle.readline()
-            elif id_b < id_a:
-                print('extra b transcript: {}'.format(id_b))
-                compare_unmatched_parsed_abundance_line(parsed_b, False, float_diff_threshold)
-                line_b = abun_b_handle.readline()
             else:
-                print('differing transcript info for id: {}'.format(id_a))
-                line_a = abun_a_handle.readline()
+                output_abundance(None, parsed_b, sample_names, out_handle)
                 line_b = abun_b_handle.readline()
+
+    both_novel = line_a and line_b
+    both_finished = (not line_a) and (not line_b)
+    if both_novel or both_finished:
+        return line_a, line_b
+
+    # Either a or b has no more lines.
+    # Read the other file until a novel line or the end
+    while line_a:
+        parsed_a = parse_abundance_line(line_a)
+        if parsed_a['is_novel']:
+            break
+
+        output_abundance(parsed_a, None, sample_names, out_handle)
+        line_a = abun_a_handle.readline()
+
+    while line_b:
+        parsed_b = parse_abundance_line(line_b)
+        if parsed_b['is_novel']:
+            break
+
+        output_abundance(None, parsed_b, sample_names, out_handle)
+        line_b = abun_b_handle.readline()
 
     return line_a, line_b
 
 
+def process_novel_abundance_line(details, abun_handle, gtf_handle):
+    if details['line']:
+        parsed = parse_abundance_line(details['line'])
+        if not parsed['is_novel']:
+            raise Exception(
+                'unexpected annotated transcript when processing novel transcripts: {}'
+                .format(details['line']))
+
+        # novel_chr is set back to None after the chr has been processed
+        if details['novel_chr'] is None:
+            details['novel_chr'] = parsed['chr']
+            details['novel_abuns'] = [parsed]
+            details['line'] = abun_handle.readline()
+        elif parsed['chr'] == details['novel_chr']:
+            details['novel_abuns'].append(parsed)
+            details['line'] = abun_handle.readline()
+        elif details['novel_defs'] is None:
+            # instead of moving to a new chr, load novel_defs_a to indicate
+            # that novel_chr_a is ready to compare
+            details['novel_defs'] = read_novel_defs(gtf_handle,
+                                                    details['novel_chr'])
+    elif details['novel_abuns'] and (not details['novel_defs']):
+        # indicate ready to compare final novel_chr
+        details['novel_defs'] = read_novel_defs(gtf_handle,
+                                                details['novel_chr'])
+
+
 def compare_novel_abundance(line_a, line_b, abun_a_handle, abun_b_handle,
-                            gtf_a_handle, gtf_b_handle, float_diff_threshold):
-    novel_chr_a = None
-    novel_chr_b = None
-    novel_abuns_a = None
-    novel_abuns_b = None
-    novel_defs_a = None
-    novel_defs_b = None
-    while line_a or line_b:
-        if line_a:
-            parsed_a = parse_abundance_line(line_a)
-            if not parsed_a['is_novel']:
-                raise Exception(
-                    'unexpected annotated transcript when processing novel transcripts: {}'
-                    .format(line_a))
-
-            if novel_chr_a is None:
-                novel_chr_a = parsed_a['chr']
-                novel_abuns_a = [parsed_a]
-                line_a = abun_a_handle.readline()
-            elif parsed_a['chr'] == novel_chr_a:
-                novel_abuns_a.append(parsed_a)
-                line_a = abun_a_handle.readline()
-            elif not novel_defs_a:
-                novel_defs_a = read_novel_defs(gtf_a_handle, novel_chr_a)
-        elif novel_chr_a and not novel_defs_a:
-            # done reading all a lines
-            novel_defs_a = read_novel_defs(gtf_a_handle, novel_chr_a)
-
-        if line_b:
-            parsed_b = parse_abundance_line(line_b)
-            if not parsed_b['is_novel']:
-                raise Exception(
-                    'unexpected annotated transcript when processing novel transcripts: {}'
-                    .format(line_b))
-
-            if novel_chr_b is None:
-                novel_chr_b = parsed_b['chr']
-                novel_abuns_b = [parsed_b]
-                line_b = abun_b_handle.readline()
-            elif parsed_b['chr'] == novel_chr_b:
-                novel_abuns_b.append(parsed_b)
-                line_b = abun_b_handle.readline()
-            elif not novel_defs_b:
-                novel_defs_b = read_novel_defs(gtf_b_handle, novel_chr_b)
-        elif novel_chr_b and not novel_defs_b:
-            # done reading all b lines
-            novel_defs_b = read_novel_defs(gtf_b_handle, novel_chr_b)
-
-        if novel_defs_a and novel_defs_b:
-            if novel_chr_a == novel_chr_b:
-                compare_novels(novel_defs_a, novel_defs_b, novel_abuns_a,
-                               novel_abuns_b, float_diff_threshold)
-                novel_chr_a = None
-                novel_abuns_a = None
-                novel_defs_a = None
-                novel_chr_b = None
-                novel_abuns_b = None
-                novel_defs_b = None
-            elif novel_chr_a < novel_chr_b:
-                print_extra_novels('a', novel_abuns_a, float_diff_threshold)
-                novel_chr_a = None
-                novel_abuns_a = None
-                novel_defs_a = None
+                            gtf_a_handle, gtf_b_handle, sample_names,
+                            out_handle):
+    # novel_defs is set when all lines for the chr are loaded
+    details_a = {
+        'novel_chr': None,
+        'novel_abuns': None,
+        'novel_defs': None,
+        'line': line_a,
+    }
+    details_b = {
+        'novel_chr': None,
+        'novel_abuns': None,
+        'novel_defs': None,
+        'line': line_b,
+    }
+    while details_a['line'] or details_b['line']:
+        process_novel_abundance_line(details_a, abun_a_handle, gtf_a_handle)
+        process_novel_abundance_line(details_b, abun_b_handle, gtf_b_handle)
+        if details_a['novel_defs'] and details_b['novel_defs']:
+            if details_a['novel_chr'] == details_b['novel_chr']:
+                compare_novels(details_a['novel_defs'],
+                               details_b['novel_defs'],
+                               details_a['novel_abuns'],
+                               details_b['novel_abuns'], sample_names,
+                               out_handle)
+                details_a['novel_chr'] = None
+                details_a['novel_abuns'] = None
+                details_a['novel_defs'] = None
+                details_b['novel_chr'] = None
+                details_b['novel_abuns'] = None
+                details_b['novel_defs'] = None
+            elif details_a['novel_chr'] < details_b['novel_chr']:
+                output_extra_novels(details_a['novel_abuns'], True,
+                                    sample_names, out_handle)
+                details_a['novel_chr'] = None
+                details_a['novel_abuns'] = None
+                details_a['novel_defs'] = None
             else:
-                print_extra_novels('b', novel_abuns_b, float_diff_threshold)
-                novel_chr_b = None
-                novel_abuns_b = None
-                novel_defs_b = None
+                output_extra_novels(details_b['novel_abuns'], False,
+                                    sample_names, out_handle)
+                details_b['novel_chr'] = None
+                details_b['novel_abuns'] = None
+                details_b['novel_defs'] = None
+        elif details_a['novel_defs'] and (not details_b['line']):
+            output_extra_novels(details_a['novel_abuns'], True, sample_names,
+                                out_handle)
+            details_a['novel_chr'] = None
+            details_a['novel_abuns'] = None
+            details_a['novel_defs'] = None
+        elif details_b['novel_defs'] and (not details_a['line']):
+            output_extra_novels(details_b['novel_abuns'], False, sample_names,
+                                out_handle)
+            details_b['novel_chr'] = None
+            details_b['novel_abuns'] = None
+            details_b['novel_defs'] = None
 
-    if novel_abuns_a and not novel_defs_a:
-        novel_defs_a = read_novel_defs(gtf_a_handle, novel_chr_a)
-
-    if novel_abuns_b and not novel_defs_b:
-        novel_defs_b = read_novel_defs(gtf_b_handle, novel_chr_b)
-
-    if novel_defs_a and novel_defs_b:
-        compare_novels(novel_defs_a, novel_defs_b, novel_abuns_a,
-                       novel_abuns_b, float_diff_threshold)
-    elif novel_defs_a:
-        print_extra_novels('a', novel_abuns_a, float_diff_threshold)
-    elif novel_defs_b:
-        print_extra_novels('b', novel_abuns_b, float_diff_threshold)
+    # process each line one last time to potentially set novel_defs
+    process_novel_abundance_line(details_a, abun_a_handle, gtf_a_handle)
+    process_novel_abundance_line(details_b, abun_b_handle, gtf_b_handle)
+    if details_a['novel_defs'] and details_b['novel_defs']:
+        compare_novels(details_a['novel_defs'], details_b['novel_defs'],
+                       details_a['novel_abuns'], details_b['novel_abuns'],
+                       sample_names, out_handle)
+    elif details_a['novel_defs']:
+        output_extra_novels(details_a['novel_abuns'], True, sample_names,
+                            out_handle)
+    elif details_b['novel_defs']:
+        output_extra_novels(details_b['novel_abuns'], False, sample_names,
+                            out_handle)
 
 
 def try_parse_float(string):
@@ -367,11 +536,15 @@ def try_parse_float(string):
 
 
 def parse_abundance_line(line):
-    columns = line.strip().split('\t')
-    transcript_id = columns[0]
-    transcript_name = columns[1]
-    gene_id = columns[2]
-    sample_float_strs = columns[3:]
+    columns = read_tsv_line(line)
+    # The 1st column is added so that the abundance and
+    # gtf files are sorted by chr.
+    # For annotated transcripts chr_for_sort = None
+    chr_for_sort = columns[0]
+    transcript_id = columns[1]
+    transcript_name = columns[2]
+    gene_id = columns[3]
+    sample_float_strs = columns[4:]
     sample_floats = list()
     for string in sample_float_strs:
         val = try_parse_float(string)
@@ -420,7 +593,7 @@ def normalize_gtf_with_handles(in_handle, out_handle):
         if in_line.startswith('#'):
             continue
 
-        columns = in_line.strip().split('\t')
+        columns = read_tsv_line(in_line)
         chr_name = columns[0]
         isoform_type = columns[1]
         feature_type = columns[2]
@@ -494,7 +667,7 @@ def write_transcript_gtf_line(transcript, handle):
         str(transcript['is_novel']),
         remove_quotes(transcript['id']),
     ]
-    handle.write('{}\n'.format('\t'.join(columns)))
+    write_tsv_line(handle, columns)
 
 
 def parse_gtf_attributes_str(attributes_str):
@@ -516,47 +689,49 @@ def parse_gtf_attributes_str(attributes_str):
 
 
 def split_annotated_and_novel_abun(in_handle, annotated_handle, novel_handle):
+    headers = None
     for i, line in enumerate(in_handle):
-        columns = line.strip().split('\t')
+        columns = read_tsv_line(line)
         if i == 0:
+            headers = columns
             expected_headers = ['transcript_ID', 'transcript_name', 'gene_ID']
-            if columns[:3] != expected_headers:
+            if headers[:3] != expected_headers:
                 raise Exception(
                     'unexpected headers in abundance file: {}'.format(line))
 
             continue
 
+        # chr_for_sort is used so that the sort order matches the sorted gtf
         transcript_id = columns[0]
         if transcript_id.startswith('ESPRESSO:'):
-            colon_splits = transcript_id.split(':')
-            espresso = colon_splits[0]
-            chr_name = colon_splits[1]
-            rest = ':'.join(colon_splits[2:])
-            new_columns = [espresso, chr_name, rest]
-            new_columns.extend(columns[1:])
-            novel_handle.write('{}\n'.format('\t'.join(new_columns)))
+            id_splits = transcript_id.split(':')
+            chr_for_sort = id_splits[1]
+            write_tsv_line(novel_handle, [chr_for_sort] + columns)
         else:
-            annotated_handle.write('{}\n'.format('\t'.join(columns)))
+            chr_for_sort = 'None'
+            write_tsv_line(annotated_handle, [chr_for_sort] + columns)
+
+    return headers
 
 
-def reformat_and_append_novel_abun(append_handle, novel_handle):
+def combine_sorted_annotated_and_novel(annotated_handle, novel_handle,
+                                       combined_handle, headers):
+    write_tsv_line(combined_handle, headers)
+    for annotated_line in annotated_handle:
+        combined_handle.write(annotated_line)
+
     for novel_line in novel_handle:
-        columns = novel_line.strip().split('\t')
-        new_columns = list()
-        combined_column = ':'.join(columns[:3])
-        new_columns.append(combined_column)
-        new_columns.extend(columns[3:])
-        append_handle.write('{}\n'.format('\t'.join(new_columns)))
+        combined_handle.write(novel_line)
 
 
-def remove_header_and_sort_abundance(orig, temp_dir, sort_memory_buffer_size):
+def sort_abundance(orig, temp_dir, sort_memory_buffer_size):
     temp_file_name_1 = get_temp_file_name(temp_dir)
     temp_file_name_2 = get_temp_file_name(temp_dir)
     with open(orig, 'rt') as in_handle:
         with open(temp_file_name_1, 'wt') as annotated_handle:
             with open(temp_file_name_2, 'wt') as novel_handle:
-                split_annotated_and_novel_abun(in_handle, annotated_handle,
-                                               novel_handle)
+                headers = split_annotated_and_novel_abun(
+                    in_handle, annotated_handle, novel_handle)
 
     sorted_temp_file_name_1 = get_temp_file_name(temp_dir)
     sorted_temp_file_name_2 = get_temp_file_name(temp_dir)
@@ -564,24 +739,30 @@ def remove_header_and_sort_abundance(orig, temp_dir, sort_memory_buffer_size):
               sort_memory_buffer_size, temp_dir)
     sort_file(temp_file_name_2, sorted_temp_file_name_2,
               sort_memory_buffer_size, temp_dir)
-    with open(sorted_temp_file_name_1, 'at') as combined_handle:
-        with open(sorted_temp_file_name_2) as novel_handle:
-            reformat_and_append_novel_abun(combined_handle, novel_handle)
+
+    final_temp_file_name = get_temp_file_name(temp_dir)
+    with open(sorted_temp_file_name_1, 'rt') as annotated_handle:
+        with open(sorted_temp_file_name_2, 'rt') as novel_handle:
+            with open(final_temp_file_name, 'wt') as combined_handle:
+                combine_sorted_annotated_and_novel(annotated_handle,
+                                                   novel_handle,
+                                                   combined_handle, headers)
 
     os.remove(temp_file_name_1)
     os.remove(temp_file_name_2)
+    os.remove(sorted_temp_file_name_1)
     os.remove(sorted_temp_file_name_2)
-    return sorted_temp_file_name_1
+    return final_temp_file_name
 
 
 def split_compat_isoforms_with_handles(in_handle, annotated_handle,
                                        novel_handle):
     for line in in_handle:
-        columns = line.strip().split('\t')
+        columns = read_tsv_line(line)
         parsed = parse_compat_line(line)
         if parsed['is_novel']:
             new_columns = [parsed['chr_name']] + columns
-            novel_handle.write('{}\n'.format('\t'.join(new_columns)))
+            write_tsv_line(novel_handle, new_columns)
         else:
             annotated_handle.write(line)
 
@@ -606,14 +787,14 @@ def split_and_sort_compat_isoforms(in_path, temp_dir, sort_memory_buffer_size):
 
 
 def parse_novel_compat_line(line):
-    columns = line.strip().split('\t')
+    columns = read_tsv_line(line)
     # chr_name = columns[0]
     orig_line = '\t'.join(columns[1:])
     return parse_compat_line(orig_line)
 
 
 def parse_compat_line(line):
-    columns = line.strip().split('\t')
+    columns = read_tsv_line(line)
     read_id = columns[0]
     sample_name = columns[1]
     read_classification = columns[2]
@@ -639,7 +820,7 @@ def parse_compat_line(line):
     }
 
 
-def compare_annotated_compat(compat_a, compat_b):
+def compare_annotated_compat(compat_a, compat_b, out_handle):
     with open(compat_a, 'rt') as a_handle:
         with open(compat_b, 'rt') as b_handle:
             line_a = a_handle.readline()
@@ -648,33 +829,33 @@ def compare_annotated_compat(compat_a, compat_b):
                 parsed_a = parse_compat_line(line_a)
                 parsed_b = parse_compat_line(line_b)
                 if parsed_a['read_id'] < parsed_b['read_id']:
-                    print('extra a read_id: {}'.format(parsed_a['read_id']))
+                    output_annotated_compat_read(parsed_a, None, out_handle)
                     line_a = a_handle.readline()
                 elif parsed_b['read_id'] < parsed_a['read_id']:
-                    print('extra b read_id: {}'.format(parsed_b['read_id']))
+                    output_annotated_compat_read(None, parsed_b, out_handle)
                     line_b = b_handle.readline()
                 else:
                     if parsed_a != parsed_b:
-                        print('compat isoforms diff: {}, {}'.format(
-                            parsed_a, parsed_b))
+                        output_annotated_compat_read(parsed_a, parsed_b,
+                                                     out_handle)
 
                     line_a = a_handle.readline()
                     line_b = b_handle.readline()
 
             while line_a:
                 parsed_a = parse_compat_line(line_a)
-                print('extra a read_id: {}'.format(parsed_a['read_id']))
+                output_annotated_compat_read(parsed_a, None, out_handle)
                 line_a = a_handle.readline()
 
             while line_b:
                 parsed_b = parse_compat_line(line_b)
-                print('extra b read_id: {}'.format(parsed_b['read_id']))
+                output_annotated_compat_read(None, parsed_b, out_handle)
                 line_b = b_handle.readline()
 
 
-def normalize_isoforms_by_definitions(parsed, novel_defs):
+def convert_novel_isoforms_to_coords(isoforms, novel_defs):
     isoform_defs = list()
-    for isoform in parsed['compat_isoforms']:
+    for isoform in isoforms:
         if isoform.startswith('ESPRESSO'):
             definition = novel_defs.get(isoform)
             coords = coords_from_definition(definition)
@@ -683,28 +864,11 @@ def normalize_isoforms_by_definitions(parsed, novel_defs):
         else:
             isoform_defs.append(isoform)
 
-    isoform_defs.sort()
     return isoform_defs
 
 
-def compare_parsed_novel_compat(parsed_a, parsed_b, novel_defs_a,
-                                novel_defs_b):
-
-    for key in ['read_id', 'sample_name', 'read_classification']:
-        if parsed_a[key] != parsed_b[key]:
-            print('compat isoforms diff {}: {}, {}'.format(
-                key, parsed_a, parsed_b))
-            return
-
-    a_isoform_defs = normalize_isoforms_by_definitions(parsed_a, novel_defs_a)
-    b_isoform_defs = normalize_isoforms_by_definitions(parsed_b, novel_defs_b)
-    if a_isoform_defs != b_isoform_defs:
-        print('compat_isoforms diff: {}, {}, {}'.format(
-            parsed_a['read_id'], a_isoform_defs, b_isoform_defs))
-
-
 def compare_novel_compat_with_handles(compat_a_handle, compat_b_handle,
-                                      gtf_a_handle, gtf_b_handle):
+                                      gtf_a_handle, gtf_b_handle, out_handle):
     novel_chr_a = None
     novel_chr_b = None
     novel_defs_a = None
@@ -722,27 +886,42 @@ def compare_novel_compat_with_handles(compat_a_handle, compat_b_handle,
             novel_defs_b = read_novel_defs(gtf_b_handle, novel_chr_b)
 
         if parsed_a['read_id'] < parsed_b['read_id']:
-            print('extra a read_id: {}'.format(parsed_a['read_id']))
+            output_novel_compat_read(parsed_a, None, novel_defs_a, None,
+                                     out_handle)
             line_a = compat_a_handle.readline()
         elif parsed_b['read_id'] < parsed_a['read_id']:
-            print('extra b read_id: {}'.format(parsed_b['read_id']))
+            output_novel_compat_read(None, parsed_b, None, novel_defs_b,
+                                     out_handle)
             line_b = compat_b_handle.readline()
         else:
-            compare_parsed_novel_compat(parsed_a, parsed_b, novel_defs_a,
-                                        novel_defs_b)
+            output_novel_compat_read(parsed_a, parsed_b, novel_defs_a,
+                                     novel_defs_b, out_handle)
             line_a = compat_a_handle.readline()
             line_b = compat_b_handle.readline()
 
     while line_a:
-        print('extra a read_id: {}'.format(parsed_a['read_id']))
+        parsed_a = parse_novel_compat_line(line_a)
+        if novel_chr_a != parsed_a['chr_name']:
+            novel_chr_a = parsed_a['chr_name']
+            novel_defs_a = read_novel_defs(gtf_a_handle, novel_chr_a)
+
+        output_novel_compat_read(parsed_a, None, novel_defs_a, None,
+                                 out_handle)
         line_a = compat_a_handle.readline()
 
     while line_b:
-        print('extra b read_id: {}'.format(parsed_b['read_id']))
+        parsed_b = parse_novel_compat_line(line_b)
+        if novel_chr_b != parsed_b['chr_name']:
+            novel_chr_b = parsed_b['chr_name']
+            novel_defs_b = read_novel_defs(gtf_b_handle, novel_chr_b)
+
+        output_novel_compat_read(None, parsed_b, None, novel_defs_b,
+                                 out_handle)
         line_b = compat_b_handle.readline()
 
 
-def compare_novel_compat(compat_a, compat_b, normed_gtf_a, normed_gtf_b):
+def compare_novel_compat(compat_a, compat_b, normed_gtf_a, normed_gtf_b,
+                         out_handle):
     with open(compat_a, 'rt') as compat_a_handle:
         with open(compat_b, 'rt') as compat_b_handle:
             with open(normed_gtf_a, 'rt') as gtf_a_handle:
@@ -750,43 +929,49 @@ def compare_novel_compat(compat_a, compat_b, normed_gtf_a, normed_gtf_b):
                     compare_novel_compat_with_handles(compat_a_handle,
                                                       compat_b_handle,
                                                       gtf_a_handle,
-                                                      gtf_b_handle)
+                                                      gtf_b_handle, out_handle)
 
 
 def compare_compatible_isoforms(compat_a, compat_b, normed_gtf_a, normed_gtf_b,
-                                temp_dir, sort_memory_buffer_size):
+                                temp_dir, sort_memory_buffer_size, out_handle):
     annotated_compat_a, novel_compat_a = split_and_sort_compat_isoforms(
         compat_a, temp_dir, sort_memory_buffer_size)
     annotated_compat_b, novel_compat_b = split_and_sort_compat_isoforms(
         compat_b, temp_dir, sort_memory_buffer_size)
 
-    compare_annotated_compat(annotated_compat_a, annotated_compat_b)
+    write_compat_headers(out_handle)
+    compare_annotated_compat(annotated_compat_a, annotated_compat_b,
+                             out_handle)
     compare_novel_compat(novel_compat_a, novel_compat_b, normed_gtf_a,
-                         normed_gtf_b)
+                         normed_gtf_b, out_handle)
 
 
 def compare_espresso_output(args, temp_dir):
-    sorted_abun_a = remove_header_and_sort_abundance(
-        args.abun_a, temp_dir, args.sort_memory_buffer_size)
-    sorted_abun_b = remove_header_and_sort_abundance(
-        args.abun_b, temp_dir, args.sort_memory_buffer_size)
+    sorted_abun_a = sort_abundance(args.abun_a, temp_dir,
+                                   args.sort_memory_buffer_size)
+    sorted_abun_b = sort_abundance(args.abun_b, temp_dir,
+                                   args.sort_memory_buffer_size)
 
     normed_gtf_a = normalize_gtf(args.gtf_a, temp_dir,
                                  args.sort_memory_buffer_size)
     normed_gtf_b = normalize_gtf(args.gtf_b, temp_dir,
                                  args.sort_memory_buffer_size)
 
-    compare_abundance(sorted_abun_a, sorted_abun_b, normed_gtf_a, normed_gtf_b,
-                      args.float_diff_threshold)
+    with open(args.out_abun_tsv, 'wt') as abun_out_handle:
+        compare_abundance(sorted_abun_a, sorted_abun_b, normed_gtf_a,
+                          normed_gtf_b, abun_out_handle)
 
     if args.compat_a or args.compat_b:
-        if not (args.compat_a and args.compat_b):
-            raise Exception(
-                'Only one of --compat-a or --compat-b was provided')
+        if not (args.compat_a and args.compat_b and args.out_compat_tsv):
+            raise Exception('Either all or none of'
+                            ' [--compat-a, --compat-b, --out-compat-tsv]'
+                            ' is required')
 
-        compare_compatible_isoforms(args.compat_a, args.compat_b, normed_gtf_a,
-                                    normed_gtf_b, temp_dir,
-                                    args.sort_memory_buffer_size)
+        with open(args.out_compat_tsv, 'wt') as compat_out_handle:
+            compare_compatible_isoforms(args.compat_a, args.compat_b,
+                                        normed_gtf_a, normed_gtf_b, temp_dir,
+                                        args.sort_memory_buffer_size,
+                                        compat_out_handle)
 
 
 def main():
@@ -801,7 +986,7 @@ def main():
     with tempfile.TemporaryDirectory(dir=args.tmp_dir) as temp_dir:
         compare_espresso_output(args, temp_dir)
 
-    print('finished')
+    print('finished', file=sys.stderr)
 
 
 if __name__ == '__main__':

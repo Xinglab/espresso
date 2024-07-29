@@ -28,12 +28,6 @@ Guppy must be installed manually since a login is required to access the ONT sof
 
 ## Usage
 
-Please ensure that enough memory is available for the input data and number of threads. The memory usage (in GB) is estimated to be:
-
-* `ESPRESSO_S`: `num_threads * (4 + read_count_of_largest_input/1,000,000)`
-* `ESPRESSO_C`: `num_threads * (4 + read_count/2,500,000)`
-* `ESPRESSO_Q`: `2 + total_read_count/4,000,000`
-
 Run the workflow with: [./run](run)
 
 ### Configuration
@@ -44,6 +38,7 @@ Run the workflow with: [./run](run)
   - `{job_name}_threads: {num_threads}`
   - `{job_name}_mem_gb: {num_GBs}`
   - `{job_name}_time_hr: {num_hours}`
+  - See "Resources" in [../README.md](../README.md) for estimates of memory and running time
 * If any samples have fast5 input then set:
   - `guppy_bin_path: /path/to/guppy/bin/`
   - Also: `guppy_gpu: true` if using a GPU version of guppy
@@ -83,7 +78,10 @@ samples:
 * Set any other config values:
   + `use_annotated_junctions_with_minimap2`: Use the junctions from the gtf as input to minimap2.
   + `keep_espresso_c_temp`: Keep temporary files from `espresso_c`.
+  + `use_blast`: Use BLAST instead of Smith-Waterman in `ESPRESSO_C`
+  + `use_alignment_read_groups`: Use overlapping alignment coordinates instead of gene coordinates from the GTF to determine read groups
   + `output_compatible_isoforms`: Produce the `samples_N2_R0_compatible_isoform.tsv` output file.
+  + `output_corrected_sam_files`: Produce a sam file containing corrected alignments for each input
   + `enable_visualization`: Generate files for visualization. Requires setting other config values under "Visualization options"
   + `target_reads_per_espresso_c_job`: How many reads should be run in a single `ESPRESSO_C` job
   + `guppy_gpu_name`: Used to request the correct GPU if submitting jobs to a scheduler

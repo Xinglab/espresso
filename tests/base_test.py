@@ -263,6 +263,25 @@ def sam_flag_int(has_multiple_segments=False,
     return flags_int
 
 
+def combine_alignments_with_junction(align_1, align_2):
+    combined = Alignment()
+    combined.chrom_name = align_1.chrom_name
+    combined.strand = align_1.strand
+    combined.start = align_1.start
+    end_1 = combined.start
+    for op in align_1.cigar.operations:
+        if op.char in ['M', '=', 'X', 'N', 'D']:
+            end_1 += op.num
+
+    combined.cigar = align_1.cigar.copy()
+    gap = align_2.start - end_1
+    combined.cigar.add_skip(gap)
+    for op in align_2.cigar.operations:
+        combined.cigar.operations.append(op.copy())
+
+    return combined
+
+
 def perfect_alignment_for_gene_and_exon_numbers(chr_name, gene, exon_numbers):
     alignment = Alignment()
     alignment.chrom_name = chr_name
@@ -430,6 +449,22 @@ def add_insertion_in_exon(alignment,
     new_match_op = CigarOp(new_match_length, 'M')
     alignment.cigar.operations.insert(exon_match_op_i + 1, new_ins_op)
     alignment.cigar.operations.insert(exon_match_op_i + 2, new_match_op)
+
+
+def replace_insertion_sequence(alignment, insert_len):
+    insertion_i = alignment.sequence.index('N' * insert_len)
+    pre_seq = alignment.sequence[:insertion_i]
+    post_seq = alignment.sequence[insertion_i + insert_len:]
+    last_pre_char = pre_seq[-1]
+    first_post_char = post_seq[0]
+    possible_different_chars = 'ACGT'
+    different_char = None
+    for char in possible_different_chars:
+        if char not in [last_pre_char, first_post_char]:
+            different_char = char
+
+    insert = different_char * insert_len
+    alignment.sequence = pre_seq + insert + post_seq
 
 
 def remove_junction_operation(alignment, junction_i=0):
@@ -620,6 +655,7 @@ class Alignment(object):
             copied.read_id = self.read_id[:]
 
         copied.is_secondary = self.is_secondary
+        return copied
 
     def set_sequence_from_cigar_and_chr_seq(self, chr_seq):
         sequence_parts = list()
@@ -649,28 +685,36 @@ class Alignment(object):
                 position = next_pos
             if op.char == 'X':
                 next_pos = position + op.num
-                mismatch_seq = list(chr_seq[position:next_pos])
-                for mismatch_i in range(op.num):
-                    mismatch_seq[mismatch_i] = self._mismatch_base(
-                        mismatch_seq[mismatch_i])
-
-                sequence_parts.append(''.join(mismatch_seq))
+                orig_seq = chr_seq[position:next_pos]
+                mismatch_seq = self._mismatch_sequence(orig_seq)
+                sequence_parts.append(mismatch_seq)
                 position = next_pos
 
         self.sequence = ''.join(sequence_parts)
 
-    # arbitrary mismatch values
-    def _mismatch_base(self, base):
-        if base in ['A', 'a']:
-            return 'C'
-        if base in ['C', 'c']:
-            return 'G'
-        if base in ['G', 'g']:
-            return 'T'
-        if base in ['T', 't']:
-            return 'A'
+    # Change every base in the sequence.
+    # Use bases that do not occur often in the original sequence.
+    def _mismatch_sequence(self, seq):
+        seq = seq.upper()
+        base_counts = {base: 0 for base in 'ACGT'}
+        for base in seq:
+            old_count = base_counts.get(base)
+            if old_count is None:
+                raise Exception('could not mismatch: {}'.format(base))
 
-        raise Exception('could not mismatch: {}'.format(base))
+            base_counts[base] = old_count + 1
+
+        base_sort = sorted(base_counts.keys(), key=lambda x: base_counts[x])
+        least_frequent = base_sort[0]
+        less_frequent = base_sort[1]
+        mismatched = list()
+        for base in seq:
+            if base == least_frequent:
+                mismatched.append(less_frequent)
+            else:
+                mismatched.append(least_frequent)
+
+        return ''.join(mismatched)
 
     def set_default_quality_from_sequence(self):
         # 'E' is about 0.9998 accuracy
@@ -825,6 +869,12 @@ class Chromosome(object):
         parts.append(last_sequence)
         return ''.join(parts)
 
+    def set_intron_start_end_between_genes(self):
+        for region in self.intergenic_regions:
+            seq_mid = region.sequence[len(INTRON_START):-len(INTRON_END)]
+            region.sequence = '{}{}{}'.format(INTRON_START, seq_mid,
+                                              INTRON_END)
+
     def copy(self):
         copied = Chromosome()
         copied.name = self.name
@@ -858,6 +908,10 @@ class BaseTest(unittest.TestCase):
                                         'split_espresso_s_output_for_c.py')
         self._combine_c_py = os.path.join(
             self._snakemake_script_dir, 'combine_espresso_c_output_for_q.py')
+        self._create_corrected_sam_py = os.path.join(
+            self._snakemake_script_dir, 'create_corrected_sam.py')
+        self._libparasail_so_path = os.path.join(self._snakemake_script_dir,
+                                                 'libparasail.so')
         self._py_executable = _get_python_executable()
 
     def _assert_within_x_percent_or_y(self, actual, expected, x_percent, y):
@@ -1042,7 +1096,12 @@ class BaseTest(unittest.TestCase):
         index = dict()
         for isoform in isoforms.values():
             key = self._get_key_from_isoform_details(isoform)
-            index[key] = isoform
+            matches = index.get(key)
+            if not matches:
+                matches = list()
+                index[key] = matches
+
+            matches.append(isoform)
 
         return {'isoforms': isoforms, 'index': index}
 
@@ -1303,17 +1362,22 @@ class BaseTest(unittest.TestCase):
             expected_key = self._get_key_from_chr_strand_and_exons(
                 expected_isoform['chr'], expected_isoform['gene'].strand,
                 expected_isoform['exons'])
-            found = detected_isoforms['index'].get(expected_key)
-            if not found:
+            matches = detected_isoforms['index'].get(expected_key)
+            if not matches:
                 self.fail('could not find: {}'.format(expected_key))
 
+            # Multiple transcripts with the same coordinates could be
+            # reported if the transcript is completely within an
+            # intergenic region.
             existing_id = expected_isoform.get('transcript_id')
+            found_ids = [x['transcript_id'] for x in matches]
             if existing_id:
-                self.assertEqual(existing_id, found['transcript_id'])
+                self.assertIn(existing_id, found_ids)
+                expected_by_id[existing_id] = expected_isoform
             else:
-                expected_isoform['transcript_id'] = found['transcript_id']
-
-            expected_by_id[found['transcript_id']] = expected_isoform
+                for found_id in found_ids:
+                    expected_isoform['transcript_id'] = found_id
+                    expected_by_id[found_id] = expected_isoform
 
         return expected_by_id
 

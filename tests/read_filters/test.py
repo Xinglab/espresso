@@ -115,7 +115,7 @@ class ReadFiltersTest(tests.base_test.BaseTest):
             alignment.mapq = mapping_quality
             alignments.append(alignment)
 
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, chroms, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(sam_path)
         sort_log = os.path.join(self._log_dir, 'sort_1.log')
@@ -166,7 +166,7 @@ class ReadFiltersTest(tests.base_test.BaseTest):
         sample_i = '0'  # only 1 sample
         command = [
             'perl', self._espresso_c, '-I', self._work_dir, '-F', self._fasta,
-            '-X', sample_i, '-T', threads
+            '-X', sample_i, '-T', threads, '--blast'
         ]
         c_log = os.path.join(self._log_dir, 'espresso_c.log')
         tests.base_test.run_command_with_log(command, c_log)

@@ -2,6 +2,7 @@ import unittest
 
 import tests.alignments.test as alignments_test
 import tests.cd44_example.test as cd44_example_test
+import tests.corrected_sam.test as corrected_sam_test
 import tests.high_confidence_sjs.test as high_confidence_sjs_test
 import tests.isoform_assignment.test as isoform_assignment_test
 import tests.read_filters.test as read_filters_test
@@ -14,6 +15,7 @@ def build_test_suite():
     suite = unittest.TestSuite()
     suite.addTest(loader.loadTestsFromModule(alignments_test))
     suite.addTest(loader.loadTestsFromModule(cd44_example_test))
+    suite.addTest(loader.loadTestsFromModule(corrected_sam_test))
     suite.addTest(loader.loadTestsFromModule(high_confidence_sjs_test))
     suite.addTest(loader.loadTestsFromModule(isoform_assignment_test))
     suite.addTest(loader.loadTestsFromModule(read_filters_test))

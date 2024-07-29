@@ -228,7 +228,7 @@ class HighConfidenceSjsTest(tests.base_test.BaseTest):
             self._chr_name, gene_2, [0, 1, 3])
         alignments.append(alignment)
 
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             first_sam, chroms, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(first_sam)
         sort_log = os.path.join(self._log_dir, 'sort_1.log')
@@ -244,7 +244,7 @@ class HighConfidenceSjsTest(tests.base_test.BaseTest):
                                                         junction_i=1,
                                                         match_len=3)
         tests.base_test.append_copies(alignments, alignment, 2)
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             second_sam, chroms, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(second_sam)
         sort_log = os.path.join(self._log_dir, 'sort_2.log')
@@ -269,6 +269,8 @@ class HighConfidenceSjsTest(tests.base_test.BaseTest):
         ]
         if gtf:
             command.extend(['-A', gtf])
+        else:
+            command.append('--alignment_read_groups')
 
         if bed:
             command.extend(['--SJ_bed', bed])

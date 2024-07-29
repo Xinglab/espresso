@@ -202,12 +202,11 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
         self.assertEqual(len(lines), 6)
 
     def _split_s_for_c(self):
-        sort_buffer = '2G'
         command = [
             self._py_executable, self._split_s_py, '--orig-work-dir',
             self._s_work_dir, '--new-base-dir', self._c_work_dir,
             '--target-reads-per-c', self._target_c_reads, '--genome-fasta',
-            self._cd44_fasta, '--sort-memory-buffer-size', sort_buffer
+            self._cd44_fasta
         ]
         split_log = os.path.join(self._log_dir, 'split_s_for_c.log')
         tests.base_test.run_command_with_log(command, split_log)
@@ -289,7 +288,7 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-206',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 110
+                'PC3E': 109
             },
             'ENST00000526025.2_2': {
                 'transcript_name': 'CD44-222',
@@ -307,7 +306,7 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-210',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 25,
-                'PC3E': 8
+                'PC3E': 9
             },
             'ENST00000527326.1_1': {
                 'transcript_name': 'CD44-225',
@@ -319,13 +318,13 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-209',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 5,
-                'PC3E': 477
+                'PC3E': 485
             },
             'ENST00000531118.5_1': {
                 'transcript_name': 'CD44-232',
                 'gene_id': 'ENSG00000026508.19_9',
-                'GS689': 3,
-                'PC3E': 12
+                'GS689': 4,
+                'PC3E': 13
             },
             'ENST00000534296.5_1': {
                 'transcript_name': 'CD44-238',
@@ -349,19 +348,25 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'CD44-208',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 23
+                'PC3E': 21
+            },
+            'ENST00000528455.5_3': {
+                'transcript_name': 'CD44-228',
+                'gene_id': 'ENSG00000026508.19_9',
+                'GS689': 0,
+                'PC3E': 1
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 2): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 22
+                'PC3E': 20
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 3): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 23
+                'PC3E': 21
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 1): {
                 'transcript_name': 'NA',
@@ -373,13 +378,13 @@ class Cd44ExampleTest(tests.base_test.BaseTest):
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 0,
-                'PC3E': 130
+                'PC3E': 131
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 4): {
                 'transcript_name': 'NA',
                 'gene_id': 'ENSG00000026508.19_9',
                 'GS689': 1,
-                'PC3E': 75
+                'PC3E': 74
             },
             tests.base_test.get_espresso_novel_id('chr11', 0, 0): {
                 'transcript_name': 'NA',

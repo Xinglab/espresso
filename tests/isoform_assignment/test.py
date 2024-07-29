@@ -541,7 +541,7 @@ class IsoformAssignmentTest(tests.base_test.BaseTest):
         tests.base_test.trim_alignment_end(alignment, 6)
         tests.base_test.append_copies(alignments, alignment, 7)
 
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, self._chromosomes, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(sam_path)
         sort_log = os.path.join(self._log_dir, 'sort.log')
@@ -1514,7 +1514,7 @@ class ReadEndpointsTest(tests.base_test.BaseTest):
                                               num_without_compat_info)
         self._add_chr25_alignments(alignments)
 
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, self._chromosomes, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(sam_path)
         sort_log = os.path.join(self._log_dir, 'sort.log')
@@ -3876,7 +3876,7 @@ class NoExternalBoundaryTest(tests.base_test.BaseTest):
         tests.base_test.extend_alignment_end(alignment, 40)
         tests.base_test.append_copies(alignments, alignment, 2)
 
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, self._chromosomes, alignments, read_id_offset)
         temp_file = '{}.tmp.sam'.format(sam_path)
         sort_log = os.path.join(self._log_dir, 'sort.log')
@@ -4112,6 +4112,561 @@ class NoExternalBoundaryTest(tests.base_test.BaseTest):
             self._chromosomes[1].genes[0].isoforms[3].id)
         expected_isoform['transcript_name'] = (
             self._chromosomes[1].genes[0].isoforms[3].name)
+        expected_isoforms.append(expected_isoform)
+
+        expected_by_id = self._get_transcript_ids_from_detected(
+            expected_isoforms, detected_isoforms)
+        self.assertEqual(len(abundance_rows), len(expected_isoforms))
+        self._check_abundance_row_values(expected_by_id, abundance_rows,
+                                         self._sample_names)
+
+
+class IntergenicTest(tests.base_test.BaseTest):
+    def setUp(self):
+        super().setUp()
+        self._test_name = 'intergenic'
+        self._test_dir = os.path.dirname(__file__)
+        self._data_dir = os.path.join(self._test_dir,
+                                      '{}_data'.format(self._test_name))
+        self._out_dir = os.path.join(self._test_dir,
+                                     '{}_out'.format(self._test_name))
+        self._log_dir = os.path.join(self._test_dir,
+                                     '{}_logs'.format(self._test_name))
+        self._work_dir = os.path.join(self._out_dir, 'work_dir')
+        self._out_file_prefix = (
+            tests.base_test.out_file_prefix_based_on_params())
+        self._chromosomes = None
+        self._fasta = None
+        self._gtf = None
+        self._sam = None
+        self._sample_names = None
+        self._samples_tsv = None
+        self._samples_updated = None
+        self._abundance = None
+        self._updated_gtf = None
+        self._compat_isoforms = None
+
+    def test(self):
+        self._initialize_dirs()
+        self._create_test_data()
+        self._create_samples_tsv()
+        self._run_espresso_s()
+        self._check_s_output()
+        self._run_espresso_c()
+        self._check_c_output()
+        self._run_espresso_q()
+        self._check_q_output()
+
+    def _initialize_dirs(self):
+        directories = [self._data_dir, self._out_dir, self._log_dir]
+        tests.base_test.remove_then_create_directories(directories)
+
+    def _create_test_data(self):
+        self._fasta = os.path.join(self._data_dir, 'test.fasta')
+        self._create_test_fasta(self._fasta)
+        self._gtf = os.path.join(self._data_dir, 'test.gtf')
+        self._create_test_gtf(self._gtf)
+        self._sam = os.path.join(self._data_dir, 'test.sam')
+        self._create_test_sam(self._sam)
+
+    def _create_test_fasta(self, fasta_path):
+        self._chromosomes = list()
+        chr_i = 1
+        gene_i = 1
+        # {:02d} pads with 0: 1 -> 01
+        chr_id_format = 'chr{:02d}'
+        gene_id_format = 'ENSG{:02d}'
+        gene_name_format = 'GENE{:02d}'
+        # chr1: compatible isoform in lower group
+        # genes have annotated exons: [0, 1]
+        # Also two intergenic exons
+        # Alignments that include exons from the lower gene and
+        # intergenic region.
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes = [gene]
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        chromosome = self._make_chromosome_from_genes(genes)
+        chromosome.set_intron_start_end_between_genes()
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
+        chr_i += 1
+        gene_i += 1
+        # chr2: like chr1 but with alignments that include exons from
+        # the intergenic region and higher gene
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes = [gene]
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        chromosome = self._make_chromosome_from_genes(genes)
+        chromosome.set_intron_start_end_between_genes()
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
+        chr_i += 1
+        gene_i += 1
+        # chr3: Like chr1 and chr 2 but with alignments that
+        # include exons from either gene and the intergenic region
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes = [gene]
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        chromosome = self._make_chromosome_from_genes(genes)
+        chromosome.set_intron_start_end_between_genes()
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
+        chr_i += 1
+        gene_i += 1
+        # chr4: Like chrs 1,2,3 but without alignments that
+        # include exons from a gene and the intergenic region
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes = [gene]
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        gene_i += 1
+        gene = self._get_random_gene(num_exons=2)
+        gene.id = gene_id_format.format(gene_i)
+        gene.name = gene_name_format.format(gene_i)
+        genes.append(gene)
+
+        chromosome = self._make_chromosome_from_genes(genes)
+        chromosome.set_intron_start_end_between_genes()
+        chromosome.name = chr_id_format.format(chr_i)
+        self._chromosomes.append(chromosome)
+
+        tests.base_test.write_fasta_from_chroms(fasta_path, self._chromosomes)
+
+    def _create_test_gtf(self, gtf_path):
+        # The middle gene in each chr is not annotated.
+        # Make a copy of the chromosome to remove the unannotated gene
+        # so that nothing for that gene is written to the gtf.
+        gtf_chroms = list()
+        for chrom in self._chromosomes:
+            for gene_i in [0, 2]:
+                gene = chrom.genes[gene_i]
+                gene.add_isoform_for_exon_numbers([0, 1], '0')
+
+            chrom_copy = chrom.copy()
+            chrom_copy.genes.pop(1)
+            gtf_chroms.append(chrom_copy)
+
+        tests.base_test.write_gtf_from_chroms(gtf_path, gtf_chroms)
+
+    def _create_test_sam(self, sam_path):
+        alignments = list()
+        read_id_offset = 0
+        chrom = self._chromosomes[0]
+        alignment_0 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_0, 2)
+        alignment_1 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[1], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_1, 2)
+        alignment_2 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[2], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_2, 2)
+        alignment_0_1 = tests.base_test.combine_alignments_with_junction(
+            alignment_0, alignment_1)
+        tests.base_test.append_copies(alignments, alignment_0_1, 2)
+
+        chrom = self._chromosomes[1]
+        alignment_0 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_0, 2)
+        alignment_1 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[1], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_1, 2)
+        alignment_2 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[2], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_2, 2)
+        alignment_1_2 = tests.base_test.combine_alignments_with_junction(
+            alignment_1, alignment_2)
+        tests.base_test.append_copies(alignments, alignment_1_2, 2)
+
+        chrom = self._chromosomes[2]
+        alignment_0 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_0, 2)
+        alignment_1 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[1], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_1, 2)
+        alignment_2 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[2], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_2, 2)
+        alignment_0_1 = tests.base_test.combine_alignments_with_junction(
+            alignment_0, alignment_1)
+        tests.base_test.append_copies(alignments, alignment_0_1, 2)
+        alignment_1_2 = tests.base_test.combine_alignments_with_junction(
+            alignment_1, alignment_2)
+        tests.base_test.append_copies(alignments, alignment_1_2, 2)
+
+        chrom = self._chromosomes[3]
+        alignment_0 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[0], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_0, 2)
+        alignment_1 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[1], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_1, 2)
+        alignment_2 = tests.base_test.perfect_alignment_for_gene_and_exon_numbers(
+            chrom.name, chrom.genes[2], [0, 1])
+        tests.base_test.append_copies(alignments, alignment_2, 2)
+
+        read_id_offset = tests.base_test.write_sam_from_alignments(
+            sam_path, self._chromosomes, alignments, read_id_offset)
+        temp_file = '{}.tmp.sam'.format(sam_path)
+        sort_log = os.path.join(self._log_dir, 'sort.log')
+        tests.base_test.sort_sam_with_temp_file(sam_path, temp_file, sort_log)
+
+    def _create_samples_tsv(self):
+        self._samples_tsv = os.path.join(self._data_dir, 'samples.tsv')
+        self._sample_names = [self._test_name]
+        with open(self._samples_tsv, 'wt') as handle:
+            columns = [self._sam, self._test_name]
+            tests.base_test.write_tsv_line(handle, columns)
+
+    def _run_espresso_s(self):
+        command = [
+            'perl', self._espresso_s, '-L', self._samples_tsv, '-F',
+            self._fasta, '-O', self._work_dir, '-A', self._gtf
+        ]
+
+        s_log = os.path.join(self._log_dir, 'espresso_s.log')
+        tests.base_test.run_command_with_log(command, s_log)
+
+    def _check_s_output(self):
+        self._samples_updated = os.path.join(self._work_dir,
+                                             'samples.tsv.updated')
+        sj_simplified_lists = list()
+        for chrom in self._chromosomes:
+            sj_simplified_lists.append(
+                os.path.join(self._work_dir,
+                             '{}_SJ_simplified.list'.format(chrom.name)))
+
+        all_sjs = os.path.join(self._work_dir, 'SJ_group_all.fa')
+        sam_list = os.path.join(self._work_dir, '0', 'sam.list3')
+        sj_list = os.path.join(self._work_dir, '0', 'sj.list')
+
+        self._assert_exists_and_non_empty(
+            [self._samples_updated, all_sjs, sam_list, sj_list] +
+            sj_simplified_lists)
+
+    def _run_espresso_c(self):
+        threads = '2'
+        sample_i = '0'  # only 1 sample
+        command = [
+            'perl', self._espresso_c, '-I', self._work_dir, '-F', self._fasta,
+            '-X', sample_i, '-T', threads
+        ]
+        c_log = os.path.join(self._log_dir, 'espresso_c.log')
+        tests.base_test.run_command_with_log(command, c_log)
+
+    def _check_c_output(self):
+        sample_i = '0'
+        for chrom in self._chromosomes:
+            read_final = os.path.join(self._work_dir, sample_i,
+                                      '{}_read_final.txt'.format(chrom.name))
+            self._assert_exists_and_non_empty([read_final])
+            parsed_read_final = self._parse_read_final(read_final)
+            self.assertGreater(len(parsed_read_final), 0)
+
+    def _run_espresso_q(self):
+        compat_basename = '{}_compatible_isoform.tsv'.format(
+            self._out_file_prefix)
+        self._compat_isoforms = os.path.join(self._work_dir, compat_basename)
+        command = [
+            'perl', self._espresso_q, '-L', self._samples_updated, '-A',
+            self._gtf, '-V', self._compat_isoforms
+        ]
+
+        q_log = os.path.join(self._log_dir, 'espresso_q.log')
+        tests.base_test.run_command_with_log(command, q_log)
+
+    def _check_q_output(self):
+        gtf_basename = '{}_updated.gtf'.format(self._out_file_prefix)
+        self._updated_gtf = os.path.join(self._work_dir, gtf_basename)
+        abundance_basename = '{}_abundance.esp'.format(self._out_file_prefix)
+        self._abundance = os.path.join(self._work_dir, abundance_basename)
+        self._assert_exists_and_non_empty(
+            [self._updated_gtf, self._abundance, self._compat_isoforms])
+        detected_isoforms = self._parse_updated_gtf(self._updated_gtf)
+        abundance_rows = self._parse_abundance(self._abundance,
+                                               self._sample_names)
+
+        expected_isoforms = list()
+        # chr1: gene_0 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[0].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[0].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # gene_0 [0, 1], intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[0]
+        expected_isoform['exons'] = [self._chromosomes[0].genes[0].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[0].genes[0].exons[1])
+        expected_isoform['exons'].append(
+            self._chromosomes[0].genes[1].exons[0])
+        expected_isoform['exons'].append(
+            self._chromosomes[0].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 4}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[0].name, 0,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[1]
+        expected_isoform['exons'] = [self._chromosomes[0].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[0].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[0].name, 1,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[0].name
+        expected_isoform['gene'] = self._chromosomes[0].genes[2]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[0].genes[2].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[0].genes[2].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+
+        # chr2: gene_0 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[1].name
+        expected_isoform['gene'] = self._chromosomes[1].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[1].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[1].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # gene_0 intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[1].name
+        expected_isoform['gene'] = self._chromosomes[1].genes[1]
+        expected_isoform['exons'] = [self._chromosomes[1].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[1].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[1].name, 2,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # intergenic [0, 1], gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[1].name
+        expected_isoform['gene'] = self._chromosomes[1].genes[2]
+        expected_isoform['exons'] = [self._chromosomes[1].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[1].genes[1].exons[1])
+        expected_isoform['exons'].append(
+            self._chromosomes[1].genes[2].exons[0])
+        expected_isoform['exons'].append(
+            self._chromosomes[1].genes[2].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 4}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[1].name, 3,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[1].name
+        expected_isoform['gene'] = self._chromosomes[1].genes[2]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[1].genes[2].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[1].genes[2].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+
+        # chr3: gene_0 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[2].name
+        expected_isoform['gene'] = self._chromosomes[2].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[2].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[2].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # gene_0 [0, 1], intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[2].name
+        expected_isoform['gene'] = self._chromosomes[2].genes[0]
+        expected_isoform['exons'] = [self._chromosomes[2].genes[0].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[0].exons[1])
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[1].exons[0])
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 4}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[2].name, 4,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # intergenic [0, 1], gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[2].name
+        expected_isoform['gene'] = self._chromosomes[2].genes[2]
+        expected_isoform['exons'] = [self._chromosomes[2].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[1].exons[1])
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[2].exons[0])
+        expected_isoform['exons'].append(
+            self._chromosomes[2].genes[2].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 4}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[2].name, 5,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[2].name
+        expected_isoform['gene'] = self._chromosomes[2].genes[2]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[2].genes[2].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[2].genes[2].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+
+        # chr4: gene_0 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[3].name
+        expected_isoform['gene'] = self._chromosomes[3].genes[0]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[3].genes[0].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[3].genes[0].isoforms[0].name)
+        expected_isoforms.append(expected_isoform)
+        # gene_0 intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[3].name
+        expected_isoform['gene'] = self._chromosomes[3].genes[1]
+        expected_isoform['exons'] = [self._chromosomes[3].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[3].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[3].name, 6,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 intergenic [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[3].name
+        expected_isoform['gene'] = self._chromosomes[3].genes[1]
+        expected_isoform['exons'] = [self._chromosomes[3].genes[1].exons[0]]
+        expected_isoform['exons'].append(
+            self._chromosomes[3].genes[1].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = True
+        expected_isoform['transcript_id'] = (
+            tests.base_test.get_espresso_novel_id(self._chromosomes[3].name, 7,
+                                                  0))
+        expected_isoforms.append(expected_isoform)
+        # gene_2 [0, 1]
+        expected_isoform = dict()
+        expected_isoform['chr'] = self._chromosomes[3].name
+        expected_isoform['gene'] = self._chromosomes[3].genes[2]
+        expected_isoform['exons'] = [expected_isoform['gene'].exons[0]]
+        expected_isoform['exons'].append(expected_isoform['gene'].exons[1])
+        expected_isoform['abundance'] = {self._test_name: 2}
+        expected_isoform['is_novel'] = False
+        expected_isoform['transcript_id'] = (
+            self._chromosomes[3].genes[2].isoforms[0].id)
+        expected_isoform['transcript_name'] = (
+            self._chromosomes[3].genes[2].isoforms[0].name)
         expected_isoforms.append(expected_isoform)
 
         expected_by_id = self._get_transcript_ids_from_detected(
