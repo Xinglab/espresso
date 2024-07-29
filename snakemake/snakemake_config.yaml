@@ -6,26 +6,33 @@ guppy_threads: 20
 guppy_time_hr: 48
 combine_c_for_q_mem_gb: 8
 combine_c_for_q_time_hr: 12
-espresso_c_mem_gb: 64
-espresso_c_threads: 5
-espresso_c_time_hr: 48
+create_corrected_sams_mem_gb: 16
+create_corrected_sams_threads: 10
+create_corrected_sams_time_hr: 48
+espresso_c_mem_gb: 32
+espresso_c_threads: 4
+espresso_c_time_hr: 12
 espresso_q_mem_gb: 64
-espresso_q_threads: 5
-espresso_q_time_hr: 48
+espresso_q_threads: 8
+espresso_q_time_hr: 12
 espresso_s_mem_gb: 64
-espresso_s_threads: 5
-espresso_s_time_hr: 48
+espresso_s_threads: 6
+espresso_s_time_hr: 12
 minimap2_mem_gb: 48
 minimap2_threads: 10
 minimap2_time_hr: 48
-split_s_for_c_mem_gb: 32
+split_s_for_c_mem_gb: 4
 split_s_for_c_time_hr: 12
 visualize_mem_gb: 40
 # Command options
 use_annotated_junctions_with_minimap2: true
 keep_espresso_c_temp: false
+use_blast: false
+use_alignment_read_groups: false
 output_compatible_isoforms: false
-target_reads_per_espresso_c_job: 1000000
+output_corrected_sam_files: false
+corrected_sam_aligner_window: 400
+target_reads_per_espresso_c_job: 400000
 # Visualization options
 enable_visualization: false
 vis_normalize_counts: false
@@ -38,8 +45,8 @@ vis_descriptive_name: 'ESPRESSO'
 # If the entry in the reference_files section ends with .gz then the
 # snakemake will gunzip the file.
 # **The gtf_name and fasta_name should not end with .gz**
-gtf_name: 'gencode.v34lift37.annotation.gtf'
-fasta_name: 'ucsc.hg19.fasta'
+gtf_name: 'gencode.v46.primary_assembly.annotation.gtf'
+fasta_name: 'GRCh38.primary_assembly.genome.fa.gz'
 # The entries under reference_files should be
 # file_name.with.extension:
 #   url: 'url_path/to_the/file_name.with.extension'
@@ -48,10 +55,10 @@ fasta_name: 'ucsc.hg19.fasta'
 # references/ with the name given on the line above the 'url:'.
 # The file will be gunzipped and the .gz removed if needed.
 reference_files:
-  gencode.v34lift37.annotation.gtf.gz:
-    url: 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh37_mapping/gencode.v34lift37.annotation.gtf.gz'
-  ucsc.hg19.fasta.gz:
-    url: 'http://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz'
+  gencode.v46.primary_assembly.annotation.gtf.gz:
+    url: 'https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.primary_assembly.annotation.gtf.gz'
+  GRCh38.primary_assembly.genome.fa.gz:
+    url: 'https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/GRCh38.primary_assembly.genome.fa.gz'
 # Input samples:
 # Each sample name will have a separate column in the abundance.esp output file.
 # Replicates can be given as separate sample names
@@ -66,3 +73,4 @@ samples:
 # Additional configuration
 guppy_bin_path: '/path/to/guppy/bin/'
 guppy_gpu: false
+# libparasail_so_path: '/path/to/libparasail.so'

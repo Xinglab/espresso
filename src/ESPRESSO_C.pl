@@ -7,12 +7,23 @@ use File::Basename qw(dirname);
 use lib dirname(__FILE__);
 use ESPRESSO_Version;
 
+# This eval makes Parasail optional (instead of 'use Parasail')
+my $has_parasail = eval
+{
+	require Parasail;
+	Parasail->import();
+	1;
+};
+
+
 my $version_number = ESPRESSO_Version::get_version_number();
 my $version_string = "C_$version_number";
+# Because it is a command line option, the name $blast_score_difference_cutoff should
+# be kept even if blast is removed from the code.
 my ($help, $in, $fa, $out, $target_ID, $num_thread, $mapq_cutoff, $keep_tmp, $proc_num_cutoff, $is_stranded,
 	$cont_del_max, $chrM, $inserted_cont_cutoff, $first_exon_diff_cutoff, $SJFS_dist, $SJFS_dist_add, $align_length_ratio_cutoff, $fold_end_length_lost_cutoff,
 	$correct_suggest_SJ_distance_max, $confirm_prob_fold_cutoff, $evalue_cor, $second_exon_align_length_ratio_cutoff, $length4nhmmer_max,
-	$END_dist_add, $blast_score_difference_cutoff, $additional_candidate_prob_fold_cutoff, $directly_approve_length_additional, $max_overlap_SJ_group, $sort_buffer_size);
+	$END_dist_add, $blast_score_difference_cutoff, $additional_candidate_prob_fold_cutoff, $directly_approve_length_additional, $max_overlap_SJ_group, $sort_buffer_size, $blast);
 
 my $arguments_before_parsing = "@ARGV";
 Getopt::Long::GetOptions (
@@ -40,7 +51,8 @@ Getopt::Long::GetOptions (
 	'directly_approve_length_additional=i'		=>	\$directly_approve_length_additional,
 	'proc_num_cutoff=i'							=>	\$proc_num_cutoff,
 	'length4nhmmer_max=i'							=>	\$length4nhmmer_max,
-	'sort_buffer_size=s'	=>	\$sort_buffer_size
+	'sort_buffer_size=s'	=>	\$sort_buffer_size,
+	'blast'	=>	\$blast
 
 );
 
@@ -69,6 +81,8 @@ Arguments:
           thread number (default: 5)
     --sort_buffer_size
           memory buffer size for running 'sort' commands (default: 2G)
+    --blast
+          Use BLAST instead of Smith-Waterman
 
 ";
 } elsif ( !defined($in) or !defined($fa) or !defined($target_ID) ) {
@@ -110,6 +124,13 @@ Arguments:
 		$sort_buffer_size = "--buffer-size=2G";
 	}
 
+	# --smith_waterman was added to the code as an optional feature.
+	# Now it's the default and --blast enables the old behavior.
+	# $blast is only used for argument parsing.
+	# $smith_waterman is used in the remainder of the code.
+	my $smith_waterman = !$blast;
+	undef $blast;
+
 	my @ends = ('start','end');
 
 	my @warn_reason;
@@ -119,9 +140,15 @@ Arguments:
 		push @die_reason, " Please designate at least 2 threads\n";
 	}
 
-	my $blast_version_error = ESPRESSO_Version::check_blast_version();
-	if ($blast_version_error ne '') {
-		push @die_reason, "$blast_version_error\n";
+	if ($smith_waterman) {
+		if (!$has_parasail) {
+			push @die_reason, "could not load Parasail module needed for Smith-Waterman\n";
+		}
+	} else {
+		my $blast_version_error = ESPRESSO_Version::check_blast_version();
+		if ($blast_version_error ne '') {
+			push @die_reason, "$blast_version_error\n";
+		}
 	}
 
 	my $nhmmer_version_error = ESPRESSO_Version::check_nhmmer_version();
@@ -148,7 +175,7 @@ Arguments:
 	opendir DIR, "$in/$target_ID" or die "cannot opendir $in/$target_ID: $!";
 
 	for my $file (readdir DIR) {
-		if ( -d "$in/$target_ID/$file" and ($file =~ /^blast_\d+$/ or $file eq 'all') ) {
+		if ( -d "$in/$target_ID/$file" and ($file =~ /^realign_\d+$/ or $file eq 'all') ) {
 			opendir DIR2, "$in/$target_ID/$file" or die "cannot opendir $in/$target_ID/$file: $!";
 			for my $file2 (readdir DIR2) {
 				if (-f "$in/$target_ID/$file/$file2"){
@@ -168,7 +195,7 @@ Arguments:
 	print_with_timestamp("Loading splice junction info");
 	#my %group_all_SJ;
 
-	# Sort the alignments to ensure deterministic grouping of reads and SJs when calling blast.
+	# Sort the alignments to ensure deterministic results.
 	# The sort columns are: -k1,1n (numeric sort of read group), -k3,3 (default sort of read ID)
 	my $in_sam_list3_path = "$in/$target_ID/sam.list3";
 	my $in_sam_list3_tmp_path = "$in_sam_list3_path" . ".tmp";
@@ -204,9 +231,9 @@ Arguments:
 				if ($group_ID ne $last_group_ID) {
 					close SJ_SIM_GROUP if exists $necessary_groups{$last_group_ID};
 					if (exists $necessary_groups{$group_ID}) {
-						my $output_dir = "$in/$target_ID/blast_$group_ID";
+						my $output_dir = "$in/$target_ID/realign_$group_ID";
 						$group_ID_mkdir{$group_ID} = [1, $chr];
-						mkdir "$in/$target_ID/blast_$group_ID";
+						mkdir "$in/$target_ID/realign_$group_ID";
 						open SJ_SIM_GROUP, ">$output_dir/SJ_info.txt" or die "cannot write $output_dir/SJ_info.txt: $!";
 					}
 				}
@@ -233,10 +260,10 @@ Arguments:
 			if ($group_ID ne $last_group_ID) {
 				close SJ_FA_GROUP if exists $necessary_groups{$last_group_ID};
 				if (exists $necessary_groups{$group_ID}) {
-					my $output_dir = "$in/$target_ID/blast_$group_ID";
+					my $output_dir = "$in/$target_ID/realign_$group_ID";
 					die "$group_ID was not recorded:$_" if !exists $group_ID_mkdir{$group_ID};
 					$group_ID_mkdir{$group_ID}[0] = 2;
-					#mkdir "$in/$target_ID/blast_$group_ID";
+					#mkdir "$in/$target_ID/realign_$group_ID";
 					open SJ_FA_GROUP, ">$output_dir/SJ_group.fa" or die "cannot write $output_dir/SJ_group.fa: $!";
 				}
 			} 
@@ -281,14 +308,14 @@ Arguments:
 
 	#open READ_SUMM, ">", $out."/read_summary.txt" or die "cannot write $out/read_summary.txt: $!";
 
-	my @output_titles = ('group_ID', 'line_num','readID','read_length','flag','chr','start','mapq','end','notSameStrand','mappedGenome','clip_ends','exonIntronRef','IDS_SJ_ref','NM_num','insNumBg','delNumBg','substNumBg','totalNumBg','SJcorSeqRef','readSeq'); #'SAM', 
+	my @output_titles = ('group_ID','line_num','readID','sample','read_length','flag','chr','start','mapq','end','notSameStrand','mappedGenome','clip_ends','exonIntronRef','IDS_SJ_ref','NM_num','insNumBg','delNumBg','substNumBg','totalNumBg','SJcorSeqRef','readSeq');
 	#21
 	print_with_timestamp(sprintf("Scanning SAMLIST by %g workers", int($num_thread/2)));
 
 	my @split_list_sort = sort {$a cmp $b} keys %{$split_list_first_read};
 	my @ths;
 	for my $file (@split_list_sort){
-		my $th = threads -> new({'context' => 'list'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths)]);
+		my $th = threads -> new({'context' => 'list'}, \&parallel_scan_samlist, [$file, ${$split_list_first_read}{$file}, scalar(@ths), $smith_waterman]);
 		my $th_id = $th->tid();
 		print " Worker $th_id begins to scan $file.\n";
 		unshift @ths, $th;
@@ -315,7 +342,7 @@ Arguments:
 		opendir DIR, "$in/$target_ID" or die "cannot opendir $in/$target_ID: $!";
 
 		for my $file (readdir DIR) {
-			if ( -d "$in/$target_ID/$file" and ($file =~ /^blast_\d+$/ or $file eq 'all') ) {
+			if ( -d "$in/$target_ID/$file" and ($file =~ /^realign_\d+$/ or $file eq 'all') ) {
 				opendir DIR2, "$in/$target_ID/$file" or die "cannot opendir $in/$target_ID/$file: $!";
 				for my $file2 (readdir DIR2) {
 					if (-f "$in/$target_ID/$file/$file2"){
@@ -336,7 +363,7 @@ Arguments:
 	print_with_timestamp("ESPRESSO_C finished its work.");
 
 	sub parallel_scan_samlist {
-		my ($file, $key_read, $thread_ID) = @{$_[0]};
+		my ($file, $key_read, $thread_ID, $smith_waterman) = @{$_[0]};
 
 		# Allow the main thread to stop other threads with kill('TERM')
 		$SIG{'TERM'} = sub { threads->exit(); };
@@ -346,6 +373,12 @@ Arguments:
 		my %summary_data = ();
 		my %pre_read_align_length;
 		my (%group_SJ_cluster, %group_SJ_cluster_ends);
+
+		my $aligner_matrix_pointer;
+		if ($smith_waterman) {
+			$aligner_matrix_pointer = &get_aligner_matrix_pointer();
+		}
+
 		open IN, "<", "$in/$target_ID/$file" or die "cannot open $in/$target_ID/$file: $!";
 		#open OUT, ">", "$out/$file.size" or die "cannot write $out/$file.size: $!" if $time == 2;
 		while (<IN>) {
@@ -360,15 +393,15 @@ Arguments:
 					my $chr0 = $all_info_read[0]{'chr'};
 					if (!defined $last_n or $n ne $last_n) {
 						if ($n ne $last_n and !defined $keep_tmp) {
-							unlink "$in/$target_ID/blast_$last_n/SJ_info.txt";
-							unlink "$in/$target_ID/blast_$last_n/SJ_group.fa";
-							rmdir "$in/$target_ID/blast_$last_n";
+							unlink "$in/$target_ID/realign_$last_n/SJ_info.txt";
+							unlink "$in/$target_ID/realign_$last_n/SJ_group.fa";
+							rmdir "$in/$target_ID/realign_$last_n";
 						}
 						$same_group_count = 0;
 						%group_SJ_cluster = ();
 						%group_SJ_cluster_ends = ();
 						if ($group_ID_mkdir{$n}[0] == 2){
-							my $SJ_list = "$in/$target_ID/blast_$n/SJ_info.txt";
+							my $SJ_list = "$in/$target_ID/realign_$n/SJ_info.txt";
 							open SJ_LIST, "<", $SJ_list or die "cannot open $SJ_list: $!";
 							while (<SJ_LIST>) {
 								chomp;
@@ -381,9 +414,8 @@ Arguments:
 							}
 							close SJ_LIST;
 
-							# sort SJ_group.fa so that it can be read line by line along with
-							# read_group_$same_group_count.fa.
-							&sort_sj_group_fa_file("$in/$target_ID/blast_$n/SJ_group.fa", "$in/$target_ID/blast_$n/SJ_group.fa.tmp");
+							# sort SJ_group.fa so that it can be read line by line
+							&sort_sj_group_fa_file("$in/$target_ID/realign_$n/SJ_group.fa", "$in/$target_ID/realign_$n/SJ_group.fa.tmp");
 						}
 						printf "$n\t%g\n", scalar(keys %group_SJ_cluster_ends), scalar(@all_info_read);
 
@@ -391,7 +423,7 @@ Arguments:
 					
 					$same_group_count ++;
 					if (scalar(%group_SJ_cluster) > 0) {
-						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0, \%summary_data); #, $time
+						&realign_reads(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/realign", $n, $same_group_count, $thread_ID, $chr0, \%summary_data, $aligner_matrix_pointer, $smith_waterman);
 					} else {
 						open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
 						for my $read_ID (0 .. $#all_info_read){
@@ -400,7 +432,7 @@ Arguments:
 							print READ_FINAL $out;
 						}
 						$summary_data{'num_reads_output'} += (scalar @all_info_read);
-						$summary_data{'num_reads_without_SJs_for_blast'} += (scalar @all_info_read);
+						$summary_data{'num_reads_without_SJs_to_correct'} += (scalar @all_info_read);
 						close READ_FINAL;
 					}
 					@all_info_read = ();
@@ -441,15 +473,15 @@ Arguments:
 					my $chr0 = $all_info_read[0]{'chr'};
 					if (!defined $last_n or $n ne $last_n) {
 						if ($n ne $last_n and !defined $keep_tmp) {
-							unlink "$in/$target_ID/blast_$last_n/SJ_info.txt";
-							unlink "$in/$target_ID/blast_$last_n/SJ_group.fa";
-							rmdir "$in/$target_ID/blast_$last_n";
+							unlink "$in/$target_ID/realign_$last_n/SJ_info.txt";
+							unlink "$in/$target_ID/realign_$last_n/SJ_group.fa";
+							rmdir "$in/$target_ID/realign_$last_n";
 						}
 						$same_group_count = 0;
 						%group_SJ_cluster = ();
 						%group_SJ_cluster_ends = ();
 						if ($group_ID_mkdir{$n}[0] == 2){
-							my $SJ_list = "$in/$target_ID/blast_$n/SJ_info.txt";
+							my $SJ_list = "$in/$target_ID/realign_$n/SJ_info.txt";
 							open SJ_LIST, "<", $SJ_list or die "cannot open $SJ_list: $!";
 							while (<SJ_LIST>) {
 								chomp;
@@ -462,9 +494,8 @@ Arguments:
 							}
 							close SJ_LIST;
 
-							# sort SJ_group.fa so that it can be read line by line along with
-							# read_group_$same_group_count.fa.
-							&sort_sj_group_fa_file("$in/$target_ID/blast_$n/SJ_group.fa", "$in/$target_ID/blast_$n/SJ_group.fa.tmp");
+							# sort SJ_group.fa so that it can be read line by line
+							&sort_sj_group_fa_file("$in/$target_ID/realign_$n/SJ_group.fa", "$in/$target_ID/realign_$n/SJ_group.fa.tmp");
 						}
 						printf "$n\t%g\n", scalar(keys %group_SJ_cluster_ends), scalar(@all_info_read);
 
@@ -472,7 +503,7 @@ Arguments:
 					
 					$same_group_count ++;
 					if (scalar(%group_SJ_cluster) > 0) {
-						&blast_prep(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/blast", $n, $same_group_count, $thread_ID, $chr0, \%summary_data); #, $time
+						&realign_reads(\@all_info_read, \%group_SJ_cluster, \%group_SJ_cluster_ends, "$in/$target_ID/realign", $n, $same_group_count, $thread_ID, $chr0, \%summary_data, $aligner_matrix_pointer, $smith_waterman);
 					} else {
 						open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
 						for my $read_ID (0 .. $#all_info_read){
@@ -481,20 +512,24 @@ Arguments:
 							print READ_FINAL $out;
 						}
 						$summary_data{'num_reads_output'} += (scalar @all_info_read);
-						$summary_data{'num_reads_without_SJs_for_blast'} += (scalar @all_info_read);
+						$summary_data{'num_reads_without_SJs_to_correct'} += (scalar @all_info_read);
 						close READ_FINAL;
 					}
 					@all_info_read = ();
 					$last_n = $n;
 					if (!defined $keep_tmp) {
-						unlink "$in/$target_ID/blast_$last_n/SJ_info.txt";
-						unlink "$in/$target_ID/blast_$last_n/SJ_group.fa";
-						rmdir "$in/$target_ID/blast_$last_n";
+						unlink "$in/$target_ID/realign_$last_n/SJ_info.txt";
+						unlink "$in/$target_ID/realign_$last_n/SJ_group.fa";
+						rmdir "$in/$target_ID/realign_$last_n";
 					}
 
 		close IN;
 		if (!defined $keep_tmp) {
 			unlink "$in/$target_ID/$file";
+		}
+
+		if ($smith_waterman) {
+			Parasail::matrix_free($aligner_matrix_pointer);
 		}
 
 		# indicate that the thread completed
@@ -506,7 +541,7 @@ Arguments:
 		my $out;
 
 		#my $read_ID_update = ($same_group_count-1)*$proc_num_cutoff+${$info_ref}{'readID'};
-		$out .= "${$info_ref}{'readID'}\tgroup_ID\t$n\t${n}_$read_ID_update\n";
+		$out .= "${$info_ref}{'readID'}\tgroup_ID\t$n\t${n}_$read_ID_update\t${$info_ref}{'sample'}\n";
 		$out .= "${$info_ref}{'readID'}\tstrand_isoform\tunknown\n";
 		$out .= "${$info_ref}{'readID'}\tstrand_read\t${$info_ref}{'notSameStrand'}\n";
 		$out .= "${$info_ref}{'readID'}\tchr\t${$info_ref}{'chr'}\n";
@@ -558,15 +593,16 @@ Arguments:
 		$out;
 	}
 
-	sub blast_prep {
-		my ($all_info_read_ref, $group_SJ_cluster_ref, $group_SJ_cluster_ends_ref, $output_pre, $n, $same_group_count, $thread_ID, $chr0, $summary_data_ref) = @_;
+	sub realign_reads {
+		my ($all_info_read_ref, $group_SJ_cluster_ref, $group_SJ_cluster_ends_ref, $output_pre, $n, $same_group_count, $thread_ID, $chr0, $summary_data_ref, $aligner_matrix_pointer, $smith_waterman) = @_;
 		###my $chr0 = $group_ID_mkdir{$n}[1];
 		#my $out_dir = "${output_pre}_$n";
-		my $out_dir = "$in/$target_ID/blast_$n/";
+		my $out_dir = "$in/$target_ID/realign_$n/";
+		my $read_final_out_path = "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt";
 
 		#mkdir $out_dir or die "cannot mkdir $out_dir: $!";
 		if (defined $keep_tmp) {
-			open BACKUP, ">", "$in/$target_ID/blast_$n/backup_$same_group_count.txt" or die "cannot write to $in/$target_ID/blast_$n/backup_$same_group_count.fa";
+			open BACKUP, ">", "$in/$target_ID/realign_$n/backup_$same_group_count.txt" or die "cannot write to $in/$target_ID/realign_$n/backup_$same_group_count.fa";
 		}
 		print BACKUP "$n\t$same_group_count\n";
 		my (%SJ_read, %read_no_SJ, @recorded_index);
@@ -592,7 +628,6 @@ Arguments:
 			} else {
 				$read_no_SJ{$read_ID} = 1;
 			}
-			
 		}
 
 		# Sort using both endpoints since two SJ clusters can share one endpoint
@@ -772,15 +807,14 @@ Arguments:
 				}
 			}
 		}
-
-		open TOBLAST, ">", "$in/$target_ID/blast_$n/read_group_$same_group_count.fa" or die "cannot write to $in/$target_ID/blast_$n/read_group_$same_group_count.fa";
+		my $to_blast_name = "$in/$target_ID/realign_$n/read_group_$same_group_count.fa";
+		open(my $to_blast_handle, ">", $to_blast_name) or die "cannot write to $to_blast_name";
+		my %read_seqs_to_align_by_cluster_index;
 		my ($max_index,undef) = sort {$b <=> $a} keys %{$group_SJ_cluster_ref};
 		for my $index_ori (0 .. $max_index) {
-			#next unless exists ${$group_SJ_cluster_ref}{$index_ori};
 			next unless exists $read_seq_pos{$index_ori};
 			# TODO $current_cluster_SJ_number may always be 0 because ${$_}[1] is 'yes' or 'no'
 			my $current_cluster_SJ_number = grep {${$_}[1]>0} @{${$group_SJ_cluster_ref}{$index_ori}};
-			#print ALLSJ "reviseN: $index_ori($current_cluster_SJ_number)\n";
 			if (@{$read_seq_pos{$index_ori}} > 0 and $max_length_cluster{$index_ori}[2] > 0) {
 				my @reads_seq4realign;
 				my @reads_cluster_sort = sort { ${$a}[0] cmp ${$b}[0] } @{$read_seq_pos{$index_ori}};
@@ -788,33 +822,13 @@ Arguments:
 				for my $read_pos_ref (@reads_cluster_sort) {
 					my ($read_ID, $strand_adapted_SJ_pos, $length_r, $length_f) = @{$read_pos_ref};
 					if (defined $last_read and $last_read ne $read_ID) {
-						my $read_info_ref = ${$all_info_read_ref}[$last_read];
-						my $read_seq4blast = ${$read_info_ref}{'readSeq'};
-						my $read_length = ${$read_info_ref}{'read_length'};
-						my $notSameStrand = ${$read_info_ref}{'notSameStrand'};
-						my (@sort_pos_SJ, $key_index);
-						@sort_pos_SJ = sort {$a <=> $b} keys %last_read2extract;
-
-
-						for my $i (0 .. $#sort_pos_SJ) {
-							my $pos = $sort_pos_SJ[$i];
-							#print ALLSJ "reviseN: $index_ori($current_cluster_SJ_number): $last_read($pos:$read_length:$notSameStrand:@{$last_read2extract{$pos}}): $i($#sort_pos_SJ)\n";
-							if ($i == $#sort_pos_SJ) {
-								if ( ($last_read2extract{$pos}[1-$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[1-$notSameStrand] > 0)) and $pos+$SJFS_dist_add+2*$SJFS_dist<$read_length ) {
-									substr($read_seq4blast, $pos+$SJFS_dist_add+2*$SJFS_dist) = 'N' x ($read_length-$pos-$SJFS_dist_add-2*$SJFS_dist);
-								}
-							} if ( $i == 0 ) {
-								if ( ($last_read2extract{$pos}[$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[$notSameStrand] > 0)) and $pos-$SJFS_dist_add-2*$SJFS_dist>0 ) {
-									substr($read_seq4blast, 0, $pos-$SJFS_dist_add-2*$SJFS_dist) = 'N' x ($pos-$SJFS_dist_add-2*$SJFS_dist);
-								}
-							} else {
-								my $replaceable_length = $pos - $sort_pos_SJ[$i-1]-2*($SJFS_dist_add+2*$SJFS_dist);
-								if ($replaceable_length > 0) {
-									substr($read_seq4blast, $sort_pos_SJ[$i-1]+$SJFS_dist_add+2*$SJFS_dist, $replaceable_length) = 'N' x $replaceable_length;
-								}
-							}
+						my $seqs_to_align = &get_sequences_to_align_for_read_id($all_info_read_ref, $last_read, \%last_read2extract, $current_cluster_SJ_number, $SJFS_dist_add, $SJFS_dist, $smith_waterman);
+						if ($smith_waterman) {
+							$read_seqs_to_align_by_cluster_index{$index_ori}{$last_read} = $seqs_to_align;
+						} else {
+							push @reads_seq4realign, (">$last_read SJclst:$index_ori:", $seqs_to_align);
 						}
-						push @reads_seq4realign, (">$last_read SJclst:$index_ori:",$read_seq4blast);
+
 						%last_read2extract = ();
 					}
 					if (!exists $last_read2extract{$strand_adapted_SJ_pos}) {
@@ -826,70 +840,58 @@ Arguments:
 							$last_read2extract{$strand_adapted_SJ_pos}[1] = $length_f;
 						}
 					}
-					
+
 					$last_read = $read_ID;
 				}
 
-					if (defined $last_read) {
-						my $read_info_ref = ${$all_info_read_ref}[$last_read];
-						my $read_seq4blast = ${$read_info_ref}{'readSeq'};
-						my $read_length = ${$read_info_ref}{'read_length'};
-						my $notSameStrand = ${$read_info_ref}{'notSameStrand'};
-						my (@sort_pos_SJ, $key_index);
-						@sort_pos_SJ = sort {$a <=> $b} keys %last_read2extract;
-
-
-						for my $i (0 .. $#sort_pos_SJ) {
-							my $pos = $sort_pos_SJ[$i];
-							#print ALLSJ "reviseN: $index_ori($current_cluster_SJ_number): $last_read($pos:$read_length:$notSameStrand:@{$last_read2extract{$pos}}): $i($#sort_pos_SJ)\n";
-							if ($i == $#sort_pos_SJ) {
-								if ( ($last_read2extract{$pos}[1-$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[1-$notSameStrand] > 0)) and $pos+$SJFS_dist_add+2*$SJFS_dist<$read_length ) {
-									substr($read_seq4blast, $pos+$SJFS_dist_add+2*$SJFS_dist) = 'N' x ($read_length-$pos-$SJFS_dist_add-2*$SJFS_dist);
-								}
-							} if ( $i == 0 ) {
-								if ( ($last_read2extract{$pos}[$notSameStrand] == 0 or ($current_cluster_SJ_number == 1 and $last_read2extract{$pos}[$notSameStrand] > 0)) and $pos-$SJFS_dist_add-2*$SJFS_dist>0 ) {
-									substr($read_seq4blast, 0, $pos-$SJFS_dist_add-2*$SJFS_dist) = 'N' x ($pos-$SJFS_dist_add-2*$SJFS_dist);
-								}
-							} else {
-								my $replaceable_length = $pos - $sort_pos_SJ[$i-1]-2*($SJFS_dist_add+2*$SJFS_dist);
-								if ($replaceable_length > 0) {
-									substr($read_seq4blast, $sort_pos_SJ[$i-1]+$SJFS_dist_add+2*$SJFS_dist, $replaceable_length) = 'N' x $replaceable_length;
-								}
-							}
-						}
-						push @reads_seq4realign, (">$last_read SJclst:$index_ori:",$read_seq4blast);
-						%last_read2extract = ();
+				if (defined $last_read) {
+					my $seqs_to_align = &get_sequences_to_align_for_read_id($all_info_read_ref, $last_read, \%last_read2extract, $current_cluster_SJ_number, $SJFS_dist_add, $SJFS_dist, $smith_waterman);
+					if ($smith_waterman) {
+						$read_seqs_to_align_by_cluster_index{$index_ori}{$last_read} = $seqs_to_align;
+					} else {
+						push @reads_seq4realign, (">$last_read SJclst:$index_ori:", $seqs_to_align);
 					}
-				
-				print TOBLAST "$_\n" for @reads_seq4realign;
-				$max_length_cluster{$index_ori}[3] += @reads_seq4realign;
+					%last_read2extract = ();
+				}
 
+				if ($smith_waterman) {
+					$max_length_cluster{$index_ori}[3] += scalar(keys %{$read_seqs_to_align_by_cluster_index{$index_ori}});
+				} else {
+					print $to_blast_handle "$_\n" for @reads_seq4realign;
+					$max_length_cluster{$index_ori}[3] += @reads_seq4realign;
+				}
 			}
 		}
 
-		close TOBLAST;
-
+		close $to_blast_handle;
 		if (defined $keep_tmp) {
 			close BACKUP;
 		}
 
+		my %alignments_by_read = ();
+		my $sj_group_fa_path = "$out_dir/SJ_group.fa";
+		open(my $sj_group_fa_handle, "<", $sj_group_fa_path);
+
 		my ($accumul_read_line, $accumul_SJ_line) = (0, 0);
-		my $blast_sj_in_path = "$out_dir/SJ_group.fa";
 		my $blast_read_in_path = "$out_dir/read_group_$same_group_count.fa";
-		open(my $blast_sj_in_handle, "<", $blast_sj_in_path);
 		open(my $blast_read_in_handle, "<", $blast_read_in_path);
-		my $blast_sj_temp_path = "$blast_sj_in_path.blast.tmp";
+		my $blast_sj_temp_path = "$sj_group_fa_path.blast.tmp";
 		my $blast_read_temp_path = "$blast_read_in_path.blast.tmp";
 		open(my $blast_sj_temp_handle, ">", $blast_sj_temp_path);
 		open(my $blast_read_temp_handle, ">", $blast_read_temp_path);
+
 		for my $index_ori (0 .. $max_index) {
+			my @cluster_sjs = ();
 			my $cluster_read_count = $max_length_cluster{$index_ori}[3];
+			# cluster_sj_count is actually 2*(number_of_sj) because each
+			# SJ is two lines in the .fa
 			my $cluster_sj_count = $max_length_cluster{$index_ori}[2];
+			if ($smith_waterman) { $cluster_sj_count = $cluster_sj_count / 2 };
 			# Always read the SJ and read lines from the files.
 			# Only write them to the temp files if there are both SJs and reads
 			my $have_both_sjs_and_reads = (($cluster_sj_count > 0) and ($cluster_read_count > 0));
 			my $anything_already_written = ($accumul_read_line > 0);
-			if ($have_both_sjs_and_reads and $anything_already_written) {
+			if (!$smith_waterman and $have_both_sjs_and_reads and $anything_already_written) {
 				my $estimate_of_blast_on_written = &estimate_blast_runtime($accumul_read_line, $accumul_SJ_line);
 				my $estimate_of_blast_on_new = &estimate_blast_runtime($cluster_read_count, $cluster_sj_count);
 				my $estimate_of_blast_on_combined = &estimate_blast_runtime($accumul_read_line + $cluster_read_count, $accumul_SJ_line + $cluster_sj_count);
@@ -907,41 +909,54 @@ Arguments:
 				}
 			}
 
-			# cluster_read_count is actually 2*(number_of_read_sequences).
-			# This is convenient because the entry for each sequence is two lines long.
-			for my $new_read_i (0 .. ($cluster_read_count - 1)) {
-				my $new_read_line = <$blast_read_in_handle>;
-				if ($have_both_sjs_and_reads) {
-					print $blast_read_temp_handle $new_read_line;
+			if ($smith_waterman) {
+				for my $sj_i (0 .. ($cluster_sj_count - 1)) {
+					my $sj_line_1 = <$sj_group_fa_handle>;
+					my $sj_line_2 = <$sj_group_fa_handle>;
+					if ($have_both_sjs_and_reads) {
+						push @cluster_sjs, &parse_sj_group_fa_entry($sj_line_1, $sj_line_2);
+					}
 				}
-			}
-			# cluster_sj_count is actually 2*(number_of_sj).
-			# This is convenient because the entry for each SJ is two lines long.
-			for my $new_sj_i (0 .. ($cluster_sj_count - 1)) {
-				my $new_sj_line = <$blast_sj_in_handle>;
+
 				if ($have_both_sjs_and_reads) {
-					print $blast_sj_temp_handle $new_sj_line;
+					&run_aligner_on_reads_and_sjs($read_seqs_to_align_by_cluster_index{$index_ori}, \@cluster_sjs, $summary_data_ref, $aligner_matrix_pointer, \%alignments_by_read);
 				}
-			}
+			} else {
+				# cluster_read_count is actually 2*(number_of_read_sequences).
+				# This is convenient because the entry for each sequence is two lines long.
+				for my $new_read_i (0 .. ($cluster_read_count - 1)) {
+					my $new_read_line = <$blast_read_in_handle>;
+					if ($have_both_sjs_and_reads) {
+						print $blast_read_temp_handle $new_read_line;
+					}
+				}
+				# cluster_sj_count is actually 2*(number_of_sj).
+				# This is convenient because the entry for each SJ is two lines long.
+				for my $new_sj_i (0 .. ($cluster_sj_count - 1)) {
+					my $new_sj_line = <$sj_group_fa_handle>;
+					if ($have_both_sjs_and_reads) {
+						print $blast_sj_temp_handle $new_sj_line;
+					}
+				}
 
-			if ($have_both_sjs_and_reads) {
-				$accumul_read_line += $cluster_read_count;
-				$accumul_SJ_line += $cluster_sj_count;
-			}
+				if ($have_both_sjs_and_reads) {
+					$accumul_read_line += $cluster_read_count;
+					$accumul_SJ_line += $cluster_sj_count;
+				}
 
-			# Make sure to run blast if this is the last loop iteration
-			if (($index_ori == $max_index) and ($accumul_read_line > 0)) {
-				# Close the temp files to flush them
-				close($blast_sj_temp_handle);
-				close($blast_read_temp_handle);
-				&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref);
-				($accumul_read_line, $accumul_SJ_line) = (0, 0);
-				# Reopen the temp files to truncate them.
-				open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
-				open($blast_read_temp_handle, ">", $blast_read_temp_path);
+				# Make sure to run blast if this is the last loop iteration
+				if (($index_ori == $max_index) and ($accumul_read_line > 0)) {
+					# Close the temp files to flush them
+					close($blast_sj_temp_handle);
+					close($blast_read_temp_handle);
+					&run_blast_on_files($blast_sj_temp_path, $blast_read_temp_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref);
+					($accumul_read_line, $accumul_SJ_line) = (0, 0);
+					# Reopen the temp files to truncate them.
+					open($blast_sj_temp_handle, ">", $blast_sj_temp_path);
+					open($blast_read_temp_handle, ">", $blast_read_temp_path);
+				}
 			}
 		}
-		close($blast_sj_in_handle);
 		close($blast_read_in_handle);
 		close($blast_sj_temp_handle);
 		close($blast_read_temp_handle);
@@ -964,7 +979,7 @@ Arguments:
 			if ($exit_sort != 0) {
 				warn "Failed to run \"$sort_command\". Exit code is $exit_sort";
 			}
-		} else {
+		} elsif (!$smith_waterman) {
 			$was_no_blast_output = 1;
 			for my $read_ID(0 .. $#{$all_info_read_ref}){
 				if ($recorded_index[$read_ID] == 1){
@@ -972,164 +987,88 @@ Arguments:
 				}
 			}
 		}
+		close($sj_group_fa_handle);
 
-		if (scalar(keys %read_no_SJ) > 0){
-			open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
+		if (scalar(keys %read_no_SJ) > 0) {
+			open READ_FINAL, ">>", "$read_final_out_path" or die "cannot write $read_final_out_path: $!";
 			while (my ($read_ID, undef) = each %read_no_SJ) {
 				my $read_ID_update = ($same_group_count-1)*$proc_num_cutoff+$read_ID;
 				my $out = &summary_final_output(${$all_info_read_ref}[$read_ID], $n, $read_ID_update, \%hc_SJ);
 				print READ_FINAL $out;
 			}
 			$summary_data_ref->{'num_reads_output'} += (scalar keys %read_no_SJ);
-			if ($was_no_blast_output) {
+			if (!$smith_waterman and $was_no_blast_output) {
 				$summary_data_ref->{'num_reads_missing_blast_output'} += (scalar keys %read_no_SJ);
 			} else {
-				$summary_data_ref->{'num_reads_without_SJs_for_blast'} += (scalar keys %read_no_SJ);
+				$summary_data_ref->{'num_reads_without_SJs_to_correct'} += (scalar keys %read_no_SJ);
 			}
 			close READ_FINAL;
 		}
 
-		my ($last_read, @pre_ID_alignments, %recorded_SJ);
 		my (%SJ_missing_candidate);
-		if(defined $output_blast){
-			open BLAST, "<", $output_blast or die "cannot open $output_blast:$!";
+		if ($smith_waterman or defined $output_blast) {
 			if (defined $keep_tmp) {
 				open READ_SUMM, ">", "$out_dir/lost_end_group_$n.backup" or die "cannot write $out_dir/lost_end_group_$n.backup: $!";
 			}
-			
-			open LOST_END, ">", "$out_dir/lost_end_group_$same_group_count.fa" or die "cannot write $out_dir/missingSJ_group_$same_group_count.fa:$!";
+
+			my $lost_end_file_path = "$out_dir/lost_end_group_$same_group_count.fa";
+			open(my $lost_end_handle, ">", $lost_end_file_path) or die "cannot write $lost_end_file_path:$!";
 			print READ_SUMM "$out_dir/lost_end_group_$same_group_count.fa loaded\n";
-			while (<BLAST>) {
-				s/\r\n//;
-				chomp;
-				my @line = split /\t/;
-				my ($read_ID, $sbjct_ID, $start, $end) = ($line[0], $line[1], $line[8], $line[9]);
-				if (defined $last_read and $last_read ne $read_ID) {
-					my $read_info_ref = ${$all_info_read_ref}[$last_read];
-					my $read_seq = ${$read_info_ref}{'readSeq'};
-					my $read_length = ${$read_info_ref}{'read_length'};
-					my $putative_total_all = ${$read_info_ref}{'totalNumBg'}+$SJFS_dist*2;
-					my @align_sort = sort { ${$a}{'query_start'} <=> ${$b}{'query_start'} or ${$a}{'query_end'}  <=> ${$b}{'query_end'}  } @pre_ID_alignments;
-					my $best_SJ_ref = &reliable_SJ_from_blast(\@align_sort, ${$read_info_ref}{'SJcorSeqRef'}, ${$read_info_ref}{'IDS_SJ_ref'}, ${$read_info_ref}{'notSameStrand'}, $read_length, $SJFS_dist*2, $putative_total_all, ${$read_info_ref}{'clip_ends'}, [${$read_info_ref}{'insNumBg'}, ${$read_info_ref}{'delNumBg'}, ${$read_info_ref}{'substNumBg'}], \%hc_SJ);
-					print READ_SUMM "$last_read\t",scalar(@align_sort),"\t$read_length\n";
-
-					${$read_info_ref}{'notSameStrand_ori'} = ${$best_SJ_ref}[2];
-					if (${$best_SJ_ref}[2] eq '0' or ${$best_SJ_ref}[2] eq '1'){
-						print READ_SUMM "best_SJ: @{$_}\n" for values %{${$best_SJ_ref}[0]};
-						${$read_info_ref}{'best_SJ'} = ${$best_SJ_ref}[0];
-						${$read_info_ref}{'additional_SJ'} = ${$best_SJ_ref}[1];
-
-						my %isoform_candidates;
-						while(my ($pos, $type_ref) = each %{${$best_SJ_ref}[1]}) {
-
-							my @sort_SJ_add = sort {(${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]) or (${$type_ref}{$b}[0] cmp ${$type_ref}{$a}[0])} keys %{$type_ref};
-
-							for my $i (0 .. $#sort_SJ_add) {
-								if ( ${$type_ref}{$sort_SJ_add[$i]}[1]*$confirm_prob_fold_cutoff >= ${$type_ref}{$sort_SJ_add[$i-1]}[1] ){
-									my $SJ2 = $sort_SJ_add[$i];
-									my $SJ2_ref = ${$type_ref}{$SJ2};
-
-									if ( $pos eq "-1" ){
-										my $length4nhmmer = &min($length4nhmmer_max, ${$SJ2_ref}[2]);
-										my $seq4hmmmer = substr( $read_seq, ${$SJ2_ref}[2]-$length4nhmmer, &min($length4nhmmer+$SJFS_dist+$SJFS_dist_add, $read_length-(${$SJ2_ref}[2]-$length4nhmmer)) );
-										my $extra_length = &min($SJFS_dist+$SJFS_dist_add, $read_length-${$SJ2_ref}[2]);
-										print LOST_END ">${last_read}$sep_end_blast$SJ2$sep_end_blast-1$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", length($seq4hmmmer), "$sep_end_blast$extra_length$sep_end_blast${$SJ2_ref}[2]\n$seq4hmmmer\n";
-										$SJ_missing_candidate{$SJ2}{0-${$read_info_ref}{'notSameStrand'}}{$last_read} = ${$SJ2_ref}[2];
-									} else {
-										my $length4nhmmer = &min($length4nhmmer_max, $read_length-${$SJ2_ref}[2]);
-										my $seq4hmmmer;
-										my $extra_length;
-										if(${$SJ2_ref}[2]>=$SJFS_dist+$SJFS_dist_add) {
-											$seq4hmmmer = substr($read_seq, ${$SJ2_ref}[2]-($SJFS_dist+$SJFS_dist_add), $length4nhmmer+$SJFS_dist+$SJFS_dist_add);
-											$extra_length = $SJFS_dist+$SJFS_dist_add;
-										} else {
-											$seq4hmmmer = substr($read_seq, 0, $length4nhmmer+${$SJ2_ref}[2]);
-											$extra_length = ${$SJ2_ref}[2];
-										}
-										print LOST_END ">${last_read}$sep_end_blast$SJ2$sep_end_blast-2$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", length($seq4hmmmer), "$sep_end_blast$extra_length$sep_end_blast", $read_length-${$SJ2_ref}[2], "\n$seq4hmmmer\n";
-										$SJ_missing_candidate{$SJ2}{${$read_info_ref}{'notSameStrand'}-1}{$last_read} = $read_length-${$SJ2_ref}[2];
-										${$read_info_ref}{'read_SJ_missing'}{${$read_info_ref}{'notSameStrand'}-1}{$SJ2} = $read_length-${$SJ2_ref}[2]+$extra_length;
-									}
-								}
+			if ($smith_waterman) {
+				while (my ($read_id, $alignments_by_sj_ref) = each %alignments_by_read) {
+					my @pre_ID_alignments;
+					while (my ($sj_id, $alignment_info_array_ref) = each %{$alignments_by_sj_ref}) {
+						# Prefer alignments with a higher score.
+						my @sorted_alignments = sort {$b->{'score'} <=> $a->{'score'}} @{$alignment_info_array_ref};
+						for my $alignment_info_ref (@sorted_alignments) {
+							my $read_start = $alignment_info_ref->{'read_start'};
+							my $read_end = $alignment_info_ref->{'read_end'};
+							my $sj_start = $alignment_info_ref->{'sj_start'};
+							my $sj_end = $alignment_info_ref->{'sj_end'};
+							my $cigar_ref = $alignment_info_ref->{'cigar'};
+							my $read_strand_matches_sj_annotation = $hc_SJ{$sj_id}[0] eq ${$all_info_read_ref}[$read_id]{'notSameStrand'};
+							my $sj_offsets_cover_junction = (($sj_start <= $SJFS_dist_add) and ($sj_end >= 2*$SJFS_dist + $SJFS_dist_add));
+							if ($sj_offsets_cover_junction and ($is_stranded != 1 or $read_strand_matches_sj_annotation)) {
+								push @pre_ID_alignments, &process_alignment_details($cigar_ref, $read_start, $read_end, $sj_start, $sj_end, $sj_id);
+								last;
 							}
 						}
 					}
-
+					&process_realign_results_for_read_id($all_info_read_ref, $read_id, $SJFS_dist, $SJFS_dist_add, \@pre_ID_alignments, \%hc_SJ, $confirm_prob_fold_cutoff, $length4nhmmer_max, $lost_end_handle, $sep_end_blast, \%SJ_missing_candidate);
 					@pre_ID_alignments = ();
-					%recorded_SJ = ();
 				}
-				if ( !exists $recorded_SJ{$sbjct_ID} and &min($start,$end)<=$SJFS_dist_add and &max($start,$end)>=2*$SJFS_dist+$SJFS_dist_add and ( (${$all_info_read_ref}[$read_ID]{'notSameStrand'}==1 and $start>$end) or (${$all_info_read_ref}[$read_ID]{'notSameStrand'}==0 and $start<$end)) and ( $is_stranded !=1 or $hc_SJ{$sbjct_ID}[0] eq ${$all_info_read_ref}[$read_ID]{'notSameStrand'}) ) {					
-					push @pre_ID_alignments, &ID_align_btop($line[-1],[$line[6], $line[7]],[$line[8], $line[9]],$sbjct_ID);
-					$recorded_SJ{$sbjct_ID} = 1;
+			} else {
+				open BLAST, "<", $output_blast or die "cannot open $output_blast:$!";
+				my ($last_read, @pre_ID_alignments, %recorded_SJ);
+				while (<BLAST>) {
+					s/\r\n//;
+					chomp;
+					my @line = split /\t/;
+					my ($read_ID, $sbjct_ID, $start, $end) = ($line[0], $line[1], $line[8], $line[9]);
+					if (defined $last_read and $last_read ne $read_ID) {
+						&process_realign_results_for_read_id($all_info_read_ref, $last_read, $SJFS_dist, $SJFS_dist_add, \@pre_ID_alignments, \%hc_SJ, $confirm_prob_fold_cutoff, $length4nhmmer_max, $lost_end_handle, $sep_end_blast, \%SJ_missing_candidate);
+						@pre_ID_alignments = ();
+						%recorded_SJ = ();
+					}
+					if ( !exists $recorded_SJ{$sbjct_ID} and &min($start,$end)<=$SJFS_dist_add and &max($start,$end)>=2*$SJFS_dist+$SJFS_dist_add and ( (${$all_info_read_ref}[$read_ID]{'notSameStrand'}==1 and $start>$end) or (${$all_info_read_ref}[$read_ID]{'notSameStrand'}==0 and $start<$end)) and ( $is_stranded !=1 or $hc_SJ{$sbjct_ID}[0] eq ${$all_info_read_ref}[$read_ID]{'notSameStrand'}) ) {
+						push @pre_ID_alignments, &ID_align_btop($line[-1],[$line[6], $line[7]],[$line[8], $line[9]],$sbjct_ID);
+						$recorded_SJ{$sbjct_ID} = 1;
+					}
+					$last_read = $read_ID;
 				}
-				
-				$last_read = $read_ID;
-			}
-
-			close BLAST;
-
+				close BLAST;
 				if (defined $last_read ) {
-					my $read_info_ref = ${$all_info_read_ref}[$last_read];
-					my $read_seq = ${$read_info_ref}{'readSeq'};
-					my $read_length = ${$read_info_ref}{'read_length'};
-					my $putative_total_all = ${$read_info_ref}{'totalNumBg'}+$SJFS_dist*2;
-					my @align_sort = sort { ${$a}{'query_start'} <=> ${$b}{'query_start'} or ${$a}{'query_end'}  <=> ${$b}{'query_end'}  } @pre_ID_alignments;
-					my $best_SJ_ref = &reliable_SJ_from_blast(\@align_sort, ${$read_info_ref}{'SJcorSeqRef'}, ${$read_info_ref}{'IDS_SJ_ref'}, ${$read_info_ref}{'notSameStrand'}, $read_length, $SJFS_dist*2, $putative_total_all, ${$read_info_ref}{'clip_ends'}, [${$read_info_ref}{'insNumBg'}, ${$read_info_ref}{'delNumBg'}, ${$read_info_ref}{'substNumBg'}], \%hc_SJ);
-					print READ_SUMM "$last_read\t",scalar(@align_sort),"\n";
-
-					${$read_info_ref}{'notSameStrand_ori'} = ${$best_SJ_ref}[2];
-					if (${$best_SJ_ref}[2] eq '0' or ${$best_SJ_ref}[2] eq '1'){
-						print READ_SUMM "best_SJ: @{$_}\n" for values %{${$best_SJ_ref}[0]};
-						${$read_info_ref}{'best_SJ'} = ${$best_SJ_ref}[0];
-						${$read_info_ref}{'additional_SJ'} = ${$best_SJ_ref}[1];
-							
-						my %isoform_candidates;
-						while(my ($pos, $type_ref) = each %{${$best_SJ_ref}[1]}) {
-							my @sort_SJ_add = sort {(${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]) or (${$type_ref}{$b}[0] cmp ${$type_ref}{$a}[0])} keys %{$type_ref};
-
-							for my $i (0 .. $#sort_SJ_add) {
-								if ( ${$type_ref}{$sort_SJ_add[$i]}[1]*$confirm_prob_fold_cutoff >= ${$type_ref}{$sort_SJ_add[$i-1]}[1] ){
-									my $SJ2 = $sort_SJ_add[$i];
-									my $SJ2_ref = ${$type_ref}{$SJ2};
-
-									if ( $pos eq "-1" ){
-										my $length4nhmmer = &min($length4nhmmer_max, ${$SJ2_ref}[2]);
-										my $seq4hmmmer = substr( $read_seq, ${$SJ2_ref}[2]-$length4nhmmer, &min($length4nhmmer+$SJFS_dist+$SJFS_dist_add, $read_length-(${$SJ2_ref}[2]-$length4nhmmer)) );
-										my $extra_length = &min($SJFS_dist+$SJFS_dist_add, $read_length-${$SJ2_ref}[2]);
-										print LOST_END ">${last_read}$sep_end_blast$SJ2$sep_end_blast-1$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", length($seq4hmmmer), "$sep_end_blast$extra_length$sep_end_blast${$SJ2_ref}[2]\n$seq4hmmmer\n";
-										$SJ_missing_candidate{$SJ2}{0-${$read_info_ref}{'notSameStrand'}}{$last_read} = ${$SJ2_ref}[2];
-									} else {
-										my $length4nhmmer = &min($length4nhmmer_max, $read_length-${$SJ2_ref}[2]);
-										my $seq4hmmmer;
-										my $extra_length;
-										if(${$SJ2_ref}[2]>=$SJFS_dist+$SJFS_dist_add) {
-											$seq4hmmmer = substr($read_seq, ${$SJ2_ref}[2]-($SJFS_dist+$SJFS_dist_add), $length4nhmmer+$SJFS_dist+$SJFS_dist_add);
-											$extra_length = $SJFS_dist+$SJFS_dist_add;
-										} else {
-											$seq4hmmmer = substr($read_seq, 0, $length4nhmmer+${$SJ2_ref}[2]);
-											$extra_length = ${$SJ2_ref}[2];
-										}
-										print LOST_END ">${last_read}$sep_end_blast$SJ2$sep_end_blast-2$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", length($seq4hmmmer), "$sep_end_blast$extra_length$sep_end_blast", $read_length-${$SJ2_ref}[2], "\n$seq4hmmmer\n";
-										$SJ_missing_candidate{$SJ2}{${$read_info_ref}{'notSameStrand'}-1}{$last_read} = $read_length-${$SJ2_ref}[2];
-										${$read_info_ref}{'read_SJ_missing'}{${$read_info_ref}{'notSameStrand'}-1}{$SJ2} = $read_length-${$SJ2_ref}[2]+$extra_length;
-									}
-								}
-							}
-						}
-					}
-
+					&process_realign_results_for_read_id($all_info_read_ref, $last_read, $SJFS_dist, $SJFS_dist_add, \@pre_ID_alignments, \%hc_SJ, $confirm_prob_fold_cutoff, $length4nhmmer_max, $lost_end_handle, $sep_end_blast, \%SJ_missing_candidate);
 					@pre_ID_alignments = ();
 					%recorded_SJ = ();
 				}
-
-			#close READ_SUMM;
-
-			if (!defined $keep_tmp) {
-				unlink $out_dir."/read_SJ_group_$same_group_count.blast";
-				unlink $output_blast;
+				if (!defined $keep_tmp) {
+					unlink $out_dir."/read_SJ_group_$same_group_count.blast";
+					unlink $output_blast;
+				}
 			}
 
-			close LOST_END;
+			close $lost_end_handle;
 
 			my $flankSJfile = "$out_dir/flankingSJ_group_$same_group_count.fa";
 			my ($db_size, $db_SJ_type_num) = (0, 0);
@@ -1209,30 +1148,30 @@ Arguments:
 				unlink $flankSJfile;
 				unlink "$out_dir/lost_end_group_$same_group_count.fa";
 			}
-			my (@blasts_lost, $blast_lost);
-			@blasts_lost = glob("$out_dir/lost_end_group_${same_group_count}_*.hmmer1");
-			if (@blasts_lost > 0) {
-				$blast_lost = "$out_dir/lost_end_group.hmmer2";
-				system("cat @blasts_lost > $out_dir/lost_end_groups.hmmer1");
+			my (@ends_lost, $end_lost);
+			@ends_lost = glob("$out_dir/lost_end_group_${same_group_count}_*.hmmer1");
+			if (@ends_lost > 0) {
+				$end_lost = "$out_dir/lost_end_group.hmmer2";
+				system("cat @ends_lost > $out_dir/lost_end_groups.hmmer1");
 				if (-s "$out_dir/lost_end_groups.hmmer1">0){
-					my $sort_command = "sort $sort_buffer_size -k3,3 -k14,14r -s $out_dir/lost_end_groups.hmmer1 > $blast_lost";
+					my $sort_command = "sort $sort_buffer_size -k3,3 -k14,14r -s $out_dir/lost_end_groups.hmmer1 > $end_lost";
 					my $exit_sort = system($sort_command);
 					if ($exit_sort != 0) {
 						warn "Failed to run \"$sort_command\". Exit code is $exit_sort";
 					}
 				}
 				if (!defined $keep_tmp) {
-					unlink "$_" for @blasts_lost;
+					unlink "$_" for @ends_lost;
 					unlink "$out_dir/lost_end_groups.hmmer1";
 					unlink "$out_dir/current_flankingSJ.fa";
 				}
 			}
 			
-			if(defined $blast_lost and -s $blast_lost > 0 ){
+			if(defined $end_lost and -s $end_lost > 0 ){
 	
 				my ($last_read, $last_pos, %last_read_info);
-				open HMMER2, "<", $blast_lost or die "cannot open $blast_lost: $!";
-				print READ_SUMM "$blast_lost loaded\n";
+				open HMMER2, "<", $end_lost or die "cannot open $end_lost: $!";
+				print READ_SUMM "$end_lost loaded\n";
 				while (<HMMER2>) {
 					chomp;
 					my @line = split /\s+/;
@@ -1278,20 +1217,42 @@ Arguments:
 						} elsif ($pos eq '-2' and $notSameStrand-1== $type and $line[4]<=$extra_length) {
 							$tag = 2;
 						}
+						# pos_update_read is the number of bases unmatched at the start or end of the read
 						my $pos_update_read;
 						if ($pos eq '-1') {
-							$pos_update_read = $line[4]+$length_raw-($length-$extra_length);
+							my $query_len_before_sj = $length - $extra_length;
+							my $query_start_unmatched = $line[4] - 1;
+							my $old_len_before_sj = $length_raw;
+							my $len_read_seq_not_in_query = $old_len_before_sj - $query_len_before_sj;
+							$pos_update_read = $query_start_unmatched + $len_read_seq_not_in_query;
 						} elsif(exists ${$all_info_read_ref}[$read_ID]{'read_SJ_missing'}{${$all_info_read_ref}[$read_ID]{'notSameStrand'}-1}{$SJ}) {
-							$pos_update_read = ${$all_info_read_ref}[$read_ID]{'read_SJ_missing'}{${$all_info_read_ref}[$read_ID]{'notSameStrand'}-1}{$SJ}-$line[5];#$SJ_missing_candidate{$SJ}{${$all_info_read_ref}{$read_ID}{'notSameStrand'}-1}{$read_ID}+($SJFS_dist+$SJFS_dist_add)-$line[7];
+							my $query_len_after_sj = $length - $extra_length;
+							my $query_end_unmatched = $length - $line[5];
+							my $old_len_after_sj = $length_raw;
+							my $len_read_seq_not_in_query = $old_len_after_sj - $query_len_after_sj;
+							$pos_update_read = $query_end_unmatched + $len_read_seq_not_in_query;
 						} else {
 							die "$pos:doesn't exists ${$all_info_read_ref}[$read_ID]{'readID'} read_SJ_missing ${$all_info_read_ref}[$read_ID]{'notSameStrand'} $SJ";
 						}
-						if ($tag > 0 and $type eq '0' and $length_G-&max($line[6], $line[7])<=$SJFS_dist+$SJFS_dist_add and abs($line[6]-$line[7])+1 > $SJFS_dist+$SJFS_dist_add and !exists $last_read_info{$cand_type}{$SJ}) { # and !exists ${$all_info_read_ref}{$read_ID}{'start_update'}
-							$last_read_info{$cand_type}{$SJ} = [$line[-3], $line[-4], $SJ_cor[1]-($length_G-($SJFS_dist+$SJFS_dist_add)-&min($line[6], $line[7])+1), $pos_update_read];
+						my $sjfs_total = $SJFS_dist + $SJFS_dist_add;
+						my $higher_target_coord = &max($line[6], $line[7]);
+						my $lower_target_coord = &min($line[6], $line[7]);
+						my $target_match_len = ($higher_target_coord - $lower_target_coord) + 1;
+						my $target_unmatched_at_end = $length_G - $higher_target_coord;
+						my $target_unmatched_at_start = $lower_target_coord - 1;
+						if ($tag > 0 and $type eq '0' and $target_unmatched_at_end <= $sjfs_total and $target_match_len > $sjfs_total and !exists $last_read_info{$cand_type}{$SJ}) {
+							my $last_coord_of_exon = $SJ_cor[1]; # 1-based
+							my $length_matched_past_sj = $sjfs_total - $target_unmatched_at_end;
+							my $length_matched_before_sj = ($target_match_len - $length_matched_past_sj) - 1;
+							my $aligned_start_coord = $last_coord_of_exon - $length_matched_before_sj;
+							$last_read_info{$cand_type}{$SJ} = [$line[-3], $line[-4], $aligned_start_coord, $pos_update_read];
 
-						} elsif ($tag > 0 and $type eq '-1' and &min($line[6], $line[7])-1<=$SJFS_dist+$SJFS_dist_add and abs($line[6]-$line[7])+1 > $SJFS_dist+$SJFS_dist_add and !exists $last_read_info{$cand_type}{$SJ}) { # and !exists ${$all_info_read_ref}{$read_ID}{'end_update'}
-							$last_read_info{$cand_type}{$SJ} = [$line[-3], $line[-4], $SJ_cor[2]+&max($line[6], $line[7])-($SJFS_dist+$SJFS_dist_add), $pos_update_read];
-
+						} elsif ($tag > 0 and $type eq '-1' and $target_unmatched_at_start <= $sjfs_total and $target_match_len > $sjfs_total and !exists $last_read_info{$cand_type}{$SJ}) {
+							my $first_coord_of_exon = $SJ_cor[2]; # 0-based
+							my $length_matched_before_sj = $sjfs_total - $target_unmatched_at_start;
+							my $length_matched_past_sj = ($target_match_len - $length_matched_before_sj) - 1;
+							my $aligned_end_coord = $first_coord_of_exon + 1 + $length_matched_past_sj;
+							$last_read_info{$cand_type}{$SJ} = [$line[-3], $line[-4], $aligned_end_coord, $pos_update_read];
 						}
 					}
 					
@@ -1329,11 +1290,11 @@ Arguments:
 			}
 			if (defined $keep_tmp) {
 				close READ_SUMM;
-			} elsif (defined $blast_lost) {
-				unlink $blast_lost;
+			} elsif (defined $end_lost) {
+				unlink $end_lost;
 			}
 			
-			open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
+			open READ_FINAL, ">>", "$read_final_out_path" or die "cannot write $read_final_out_path: $!";
 
 			for my $read_ID (0 .. $#{$all_info_read_ref}) {
 				my $read_ID_update = ($same_group_count-1)*$proc_num_cutoff+$read_ID;
@@ -1343,7 +1304,7 @@ Arguments:
 				my $out;
 				my $read_length = ${$info_ref}{'read_length'};
 
-				$out .= "${$all_info_read_ref}[$read_ID]{'readID'}\tgroup_ID\t$n\t${n}_$read_ID_update\n";
+				$out .= "${$all_info_read_ref}[$read_ID]{'readID'}\tgroup_ID\t$n\t${n}_$read_ID_update\t${$all_info_read_ref}[$read_ID]{'sample'}\n";
 				$out .= "${$all_info_read_ref}[$read_ID]{'readID'}\tstrand_isoform\t${$info_ref}{'notSameStrand_ori'}\n";
 				$out .= "${$all_info_read_ref}[$read_ID]{'readID'}\tstrand_read\t${$info_ref}{'notSameStrand'}\n";
 				$out .= "${$all_info_read_ref}[$read_ID]{'readID'}\tchr\t${$info_ref}{'chr'}\n";
@@ -1366,7 +1327,8 @@ Arguments:
 							$out .= "corrected\t";
 							$summary_data_ref->{'number_of_corrected_SJ_alignments'} ++;
 						}
-						my @dist_correct = (${$SJ_info_correct}[2], $read_length-${$SJ_info_correct}[2]);
+						my $read_pos_matched_to_sj = ${$SJ_info_correct}[5];
+						my @dist_correct = ($read_pos_matched_to_sj, $read_length-$read_pos_matched_to_sj);
 						$out .= "${$SJ_info_correct}[0]\t$dist_correct[${$info_ref}{'notSameStrand'}]\t$dist_correct[1-${$info_ref}{'notSameStrand'}]\t${$SJ_info_correct}[1]\t";
 						if (defined $hc_SJ{${$SJ_info}[1]}) {
 							$out .= "$hc_SJ{${$SJ_info}[1]}[1]\t";
@@ -1401,7 +1363,8 @@ Arguments:
 						my $update = $i.'_update';
 						$unmapped_ends{$i_convert} = ${$info_ref}{$update}[1];
 						$mapped_genome_range{$i_convert} = ${$info_ref}{$update}[0];
-						my @dist_correct = (${$SJ_info}[2], $read_length-${$SJ_info}[2]);
+						my $read_pos_matched_to_sj = ${$SJ_info}[4];
+						my @dist_correct = ($read_pos_matched_to_sj, $read_length-$read_pos_matched_to_sj);
 						$out .= "$out_line\t$i_convert\tNA\tNA\tNA\tadded\t${$SJ_info}[0]\t$dist_correct[${$info_ref}{'notSameStrand'}]\t$dist_correct[1-${$info_ref}{'notSameStrand'}]\t${$SJ_info}[1]\tNA\t";
 						$out .= "$hc_SJ{${$SJ_info}[0]}[1]\n";
 						if ($i == '-1') {
@@ -1457,7 +1420,6 @@ Arguments:
 
 			close READ_FINAL;
 		} else {
-			
 			open READ_FINAL, ">>", "$in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt" or die "cannot write $in/$target_ID/all/${thread_ID}_thread_${chr0}_read_final.txt: $!";
 			for my $read_ID (0 .. $#{$all_info_read_ref}) {
 				next if exists $read_no_SJ{$read_ID};
@@ -1468,11 +1430,69 @@ Arguments:
 				$summary_data_ref->{'num_reads_missing_blast_output'} ++;
 			}
 			close READ_FINAL;
+    }
+	}
+
+	sub process_realign_results_for_read_id {
+		my ($all_info_read_ref, $last_read, $SJFS_dist, $SJFS_dist_add, $pre_ID_alignments_ref, $hc_SJ_ref, $confirm_prob_fold_cutoff, $length4nhmmer_max, $lost_end_handle, $sep_end_blast, $SJ_missing_candidate_ref) = @_;
+
+		my $read_info_ref = ${$all_info_read_ref}[$last_read];
+		my $read_seq = ${$read_info_ref}{'readSeq'};
+		my $read_length = ${$read_info_ref}{'read_length'};
+		my $putative_total_all = ${$read_info_ref}{'totalNumBg'}+$SJFS_dist*2;
+		my @align_sort = sort { ${$a}{'query_start'} <=> ${$b}{'query_start'} or ${$a}{'query_end'}  <=> ${$b}{'query_end'}  } @{$pre_ID_alignments_ref};
+		my $best_SJ_ref = &reliable_SJ_from_realign(\@align_sort, ${$read_info_ref}{'SJcorSeqRef'}, ${$read_info_ref}{'IDS_SJ_ref'}, ${$read_info_ref}{'notSameStrand'}, $read_length, $SJFS_dist*2, $putative_total_all, ${$read_info_ref}{'clip_ends'}, [${$read_info_ref}{'insNumBg'}, ${$read_info_ref}{'delNumBg'}, ${$read_info_ref}{'substNumBg'}], $hc_SJ_ref);
+		print READ_SUMM "$last_read\t",scalar(@align_sort),"\t$read_length\n";
+
+		${$read_info_ref}{'notSameStrand_ori'} = ${$best_SJ_ref}[2];
+		if (${$best_SJ_ref}[2] eq '0' or ${$best_SJ_ref}[2] eq '1') {
+			print READ_SUMM "best_SJ: @{$_}\n" for values %{${$best_SJ_ref}[0]};
+			${$read_info_ref}{'best_SJ'} = ${$best_SJ_ref}[0];
+			${$read_info_ref}{'additional_SJ'} = ${$best_SJ_ref}[1];
+
+			my %isoform_candidates;
+			while(my ($pos, $type_ref) = each %{${$best_SJ_ref}[1]}) {
+				my @sort_SJ_add = sort {(${$type_ref}{$b}[1] <=> ${$type_ref}{$a}[1]) or (${$type_ref}{$b}[0] cmp ${$type_ref}{$a}[0])} keys %{$type_ref};
+
+				for my $i (0 .. $#sort_SJ_add) {
+					if ( ${$type_ref}{$sort_SJ_add[$i]}[1]*$confirm_prob_fold_cutoff >= ${$type_ref}{$sort_SJ_add[$i-1]}[1] ){
+						my $SJ2 = $sort_SJ_add[$i];
+						my $SJ2_ref = ${$type_ref}{$SJ2};
+						# $junction_pos is a 0-based offset in the read sequence.
+						# It's the last base of the exon
+						my $junction_pos = ${$SJ2_ref}[4] - 1;
+						if ( $pos eq "-1" ) {
+							my $substr_start = $junction_pos - ($length4nhmmer_max - 1);
+							$substr_start = &max($substr_start, 0);
+							my $substr_end = $junction_pos + $SJFS_dist + $SJFS_dist_add;
+							$substr_end = &min($substr_end, $read_length - 1);
+							my $substr_length = ($substr_end - $substr_start) + 1;
+							my $seq4hmmmer = substr($read_seq, $substr_start, $substr_length);
+							my $extra_length = $substr_end - $junction_pos;
+							my $length_before_sj = $junction_pos + 1;
+							print $lost_end_handle ">${last_read}$sep_end_blast$SJ2$sep_end_blast-1$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", $substr_length, "$sep_end_blast$extra_length$sep_end_blast$length_before_sj\n$seq4hmmmer\n";
+							$SJ_missing_candidate_ref->{$SJ2}{0-${$read_info_ref}{'notSameStrand'}}{$last_read} = $junction_pos;
+						} else {
+							my $substr_end = $junction_pos + $length4nhmmer_max;
+							$substr_end = &min($substr_end, $read_length - 1);
+							my $substr_start = $junction_pos - ($SJFS_dist + $SJFS_dist_add - 1);
+							$substr_start = &max($substr_start, 0);
+							my $substr_length = ($substr_end - $substr_start) + 1;
+							my $seq4hmmmer = substr($read_seq, $substr_start, $substr_length);
+							my $extra_length = ($junction_pos - $substr_start) + 1;
+							my $length_after_sj = ($read_length - $junction_pos) - 1;
+							print $lost_end_handle ">${last_read}$sep_end_blast$SJ2$sep_end_blast-2$sep_end_blast${$read_info_ref}{'notSameStrand'}$sep_end_blast", $substr_length, "$sep_end_blast$extra_length$sep_end_blast", $length_after_sj, "\n$seq4hmmmer\n";
+							$SJ_missing_candidate_ref->{$SJ2}{${$read_info_ref}{'notSameStrand'}-1}{$last_read} = $length_after_sj;
+							${$read_info_ref}{'read_SJ_missing'}{${$read_info_ref}{'notSameStrand'}-1}{$SJ2} = $length_after_sj + $extra_length;
+						}
+					}
+				}
+			}
 		}
 	}
 
 
-	sub reliable_SJ_from_blast {
+	sub reliable_SJ_from_realign {
 		my @sorted_2ends = @{$_[0]}; 
 		my @detected_SJ = @{$_[1]}; 
 		my @IDS_original = @{$_[2]};
@@ -1604,20 +1624,24 @@ Arguments:
 			if (exists $candidate_SJ_group{$notSameStrand_ori}{$SJ}) {
 				my @sort_score = sort {${$b}{'prob_hyperg'} <=> ${$a}{'prob_hyperg'}} @{$candidate_SJ_group{$notSameStrand_ori}{$SJ}};
 				my $est_pos_read;
+				my $read_pos_matched_to_sj;
 				if (exists $sort_score[0]{'query_start'}){
-					$est_pos_read = ($sort_score[0]{'query_start'}-1+$sort_score[0]{'query_end'})/2;
+					# ensure the estimated read position is an integer
+					$est_pos_read = int(($sort_score[0]{'query_start'} + $sort_score[0]{'query_end'}) / 2);
+					$read_pos_matched_to_sj = $sort_score[0]{'query_sj_pos'};
 				}
 				$candidate_SJ_group{$notSameStrand_ori}{$SJ} = \@sort_score;
 				if (exists ${$all_candidate_ref}{$SJ} and ($notSameStrand_ori eq $SJ_loci[-1] or $SJ_loci[-1] eq 'x') and $mapper_SJ_IDM_prob_hyperg{$SJ} > $sort_score[0]{'prob_hyperg'}*$additional_candidate_prob_fold_cutoff) { #${$SJ_info_ref}[1] > 0 or >=
 					$est_pos_read = ${$SJ_info_ref}[0];
-					$corrected_SJ_pos{$SJ} = [$SJ, $mapper_SJ_IDM_prob_hyperg{$SJ}, $est_pos_read, ${$SJ_info_ref}[1], ${$SJ_info_ref}[2]];
+					$read_pos_matched_to_sj = $est_pos_read;
+					$corrected_SJ_pos{$SJ} = [$SJ, $mapper_SJ_IDM_prob_hyperg{$SJ}, $est_pos_read, ${$SJ_info_ref}[1], ${$SJ_info_ref}[2], $read_pos_matched_to_sj];
 					print READ_SUMM "perfect_SJ_confirmed: $SJ, ${$SJ_info_ref}[0], ${$SJ_info_ref}[1]: $SJ, $mapper_SJ_IDM_prob_hyperg{$SJ}, ", ${$SJ_info_ref}[0], "\n";
 				} elsif (@sort_score >= 2 and $sort_score[0]{'prob_hyperg'} >= $confirm_prob_fold_cutoff*$sort_score[1]{'prob_hyperg'}) { #### change to larger than 0.9*all_probability 
 
-					$corrected_SJ_pos{$SJ} = [$sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, $est_pos_read, 0, ${$SJ_info_ref}[2]];
+					$corrected_SJ_pos{$SJ} = [$sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, $est_pos_read, 0, ${$SJ_info_ref}[2], $read_pos_matched_to_sj];
 					print READ_SUMM "corrected_SJ_confirmed: $SJ, ${$SJ_info_ref}[0], ${$SJ_info_ref}[1]: $sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, ", $est_pos_read, "\n";
 				} elsif (@sort_score == 1 and $sort_score[0]{'SJ_ID'} ne $SJ) {
-					$corrected_SJ_pos{$SJ} = [$sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, $est_pos_read, 1, ${$SJ_info_ref}[2]];
+					$corrected_SJ_pos{$SJ} = [$sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, $est_pos_read, 1, ${$SJ_info_ref}[2], $read_pos_matched_to_sj];
 					print READ_SUMM "corrected_SJ_only_choice: $SJ, ${$SJ_info_ref}[0], ${$SJ_info_ref}[1]: $sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, ", $est_pos_read, "\n";
 				} else {
 					print READ_SUMM "undetermined_multiple_choice: $SJ, ${$SJ_info_ref}[0], ${$SJ_info_ref}[1]: $sort_score[0]{'SJ_ID'}, $sort_score[0]{'prob_hyperg'}, ", $est_pos_read, "\n";
@@ -1646,14 +1670,17 @@ Arguments:
 				my @SJ_loci = split $sep_SJ, $SJ;
 				if (${$first_candidate_ref}{'prob_hyperg'} >= $ave and abs($SJ_novel_loci[1]-$SJ_loci[1])<=$correct_suggest_SJ_distance_max and abs($SJ_novel_loci[2]-$SJ_loci[2])<=$correct_suggest_SJ_distance_max){
 					my $est_pos_read;
+					my $read_pos_matched_to_sj;
 					if (exists ${$first_candidate_ref}{'query_start'}){
-						$est_pos_read = (${$first_candidate_ref}{'query_start'}-1+${$first_candidate_ref}{'query_end'})/2;
+						$est_pos_read = int((${$first_candidate_ref}{'query_start'} + ${$first_candidate_ref}{'query_end'}) / 2);
+						$read_pos_matched_to_sj = ${$first_candidate_ref}{'query_sj_pos'};
 					} elsif ($SJ eq ${$first_candidate_ref}{'SJ_ID'}) {
 						$est_pos_read = $detected_SJ_pos{$SJ}[0];
+						$read_pos_matched_to_sj = $est_pos_read;
 					} else {
 						die "$SJ ne ${$first_candidate_ref}{'SJ_ID'}!!";
 					}
-					$corrected_SJ_pos{$SJ} = [${$first_candidate_ref}{'SJ_ID'}, ${$first_candidate_ref}{'prob_hyperg'}, $est_pos_read, 0];
+					$corrected_SJ_pos{$SJ} = [${$first_candidate_ref}{'SJ_ID'}, ${$first_candidate_ref}{'prob_hyperg'}, $est_pos_read, 0, undef, $read_pos_matched_to_sj];
 					print READ_SUMM "!!!added_middle ${$first_candidate_ref}{'SJ_ID'}, ${$first_candidate_ref}{'prob_hyperg'}, ", $est_pos_read, "\n";
 				}
 			}
@@ -1677,17 +1704,18 @@ Arguments:
 
 			for my $align_ref (@sorted_2ends_remove0) {
 
-				my $amb_read_pos = (${$align_ref}{'query_start'}-1+${$align_ref}{'query_end'})/2;
+				my $amb_read_pos = int((${$align_ref}{'query_start'} + ${$align_ref}{'query_end'}) / 2);
+				my $read_pos_matched_to_sj = ${$align_ref}{'query_sj_pos'};
 				my @SJ_loci = split $sep_SJ, ${$align_ref}{'SJ_ID'};
 
 				my $align_ref_length_half;
 				print READ_SUMM "-1\t${$align_ref}{'SJ_ID'}\t$SJ_pos_pre_first\t$amb_read_pos\t",$SJ_loci_first[$notSameStrand+1],"\t", $SJ_loci[2-$notSameStrand], "\n" if ${$align_ref}{'query_end'} < $SJ_pos_pre_first;
 				print READ_SUMM "-2\t${$align_ref}{'SJ_ID'}\t$SJ_pos_pre_last\t$amb_read_pos\t",$SJ_loci_last[2-$notSameStrand], "\t", $SJ_loci[$notSameStrand+1],"\n" if ${$align_ref}{'query_start'}-1 > $SJ_pos_pre_last;
 				if ( (${$align_ref}{'notSameStrand_SJ'} eq $notSameStrand_ori or ${$align_ref}{'notSameStrand_SJ'} eq 'x') and ${$align_ref}{'query_end'} < $SJ_pos_pre_first and abs($amb_read_pos-$clip_ends[0]) <= $first_exon_diff_cutoff and ($SJ_loci_first[$notSameStrand+1]-$SJ_loci[2-$notSameStrand])*(0.5-$notSameStrand) > 0 and ($SJ_loci_first[$notSameStrand+1]-$SJ_loci[2-$notSameStrand])*(0.5-$notSameStrand)*2*$second_exon_align_length_ratio_cutoff < ($SJ_pos_pre_first-$amb_read_pos) and ($SJ_loci_first[$notSameStrand+1]-$SJ_loci[2-$notSameStrand])*(0.5-$notSameStrand)*2 > ($SJ_pos_pre_first-$amb_read_pos)*$second_exon_align_length_ratio_cutoff and ${$align_ref}{'prob_hyperg'} >= $min*$additional_candidate_prob_fold_cutoff ) { #and ${$align_ref}{'prob_hyperg'} >= $ave
-					$additional_SJ{'-1'}{${$align_ref}{'SJ_ID'}} = [${$align_ref}{'SJ_ID'},${$align_ref}{'prob_hyperg'},$amb_read_pos,-1];
+					$additional_SJ{'-1'}{${$align_ref}{'SJ_ID'}} = [${$align_ref}{'SJ_ID'},${$align_ref}{'prob_hyperg'},$amb_read_pos,-1, $read_pos_matched_to_sj];
 					print READ_SUMM "!!!added_first ${$align_ref}{'SJ_ID'}, ${$align_ref}{'prob_hyperg'}, ", $amb_read_pos, "\n";
 				} elsif ( (${$align_ref}{'notSameStrand_SJ'} eq $notSameStrand_ori or ${$align_ref}{'notSameStrand_SJ'} eq 'x') and ${$align_ref}{'query_start'}-1 > $SJ_pos_pre_last and abs($read_length-$amb_read_pos-$clip_ends[1]) <= $first_exon_diff_cutoff and ($SJ_loci[$notSameStrand+1]-$SJ_loci_last[2-$notSameStrand])*(0.5-$notSameStrand) > 0 and ($SJ_loci[$notSameStrand+1]-$SJ_loci_last[2-$notSameStrand])*(0.5-$notSameStrand)*2*$second_exon_align_length_ratio_cutoff < ($amb_read_pos-$SJ_pos_pre_last) and ($SJ_loci[$notSameStrand+1]-$SJ_loci_last[2-$notSameStrand])*(0.5-$notSameStrand)*2 > ($amb_read_pos-$SJ_pos_pre_last)*$second_exon_align_length_ratio_cutoff and ${$align_ref}{'prob_hyperg'} >= $min*$additional_candidate_prob_fold_cutoff ){ # and ${$align_ref}{'prob_hyperg'} >= $ave
-					$additional_SJ{'-2'}{${$align_ref}{'SJ_ID'}} = [${$align_ref}{'SJ_ID'},${$align_ref}{'prob_hyperg'},$amb_read_pos,-2];
+					$additional_SJ{'-2'}{${$align_ref}{'SJ_ID'}} = [${$align_ref}{'SJ_ID'},${$align_ref}{'prob_hyperg'},$amb_read_pos,-2, $read_pos_matched_to_sj];
 					print READ_SUMM "!!!added_last ${$align_ref}{'SJ_ID'}, ${$align_ref}{'prob_hyperg'}, ", $amb_read_pos, "\n";
 				}
 			}
@@ -1831,25 +1859,41 @@ Arguments:
 		my ($btop, $query_2ends_ref, $sbjct_2ends_ref, $sbjct_ID) = @_;
 		my ($loci_query, $loci_sbjct) = (${$query_2ends_ref}[0], ${$sbjct_2ends_ref}[0]);
 		my ($loci_sbjct_min, $loci_sbjct_max) = ($SJFS_dist_add+1, $SJFS_dist*2+$SJFS_dist_add);
-		my $inc = (${$sbjct_2ends_ref}[1] - ${$sbjct_2ends_ref}[0])/abs(${$sbjct_2ends_ref}[1] - ${$sbjct_2ends_ref}[0]);
-		
+		my $loci_sbjct_sj = $SJFS_dist_add + $SJFS_dist;
+		my $inc = 1;
+		if (${$sbjct_2ends_ref}[0] > ${$sbjct_2ends_ref}[1]) {
+			$inc = -1;
+		}
+
 		my @matches = split /\D+/, $btop;
 		my @mismatches_raw = split /\d+/, $btop;
-
 		shift @mismatches_raw;
 
 		my %IDM_sbjct;
 		my %start_end_match;
+		my $query_sj_pos = undef;
+		my $query_sj_pos_default = $loci_query;
 
 		for my $i (0 .. $#matches) {
 			for my $j (1 .. $matches[$i]) {
 				if ($loci_sbjct >= $loci_sbjct_min and $loci_sbjct <= $loci_sbjct_max){
 					$start_end_match{$loci_sbjct} = $loci_query;
 				}
+				if ($inc == 1) {
+					# Record the last position that matched in the exon before the SJ
+					if ($loci_sbjct <= $loci_sbjct_sj) {
+						$query_sj_pos = $loci_query;
+					}
+				} else {
+					# Since working backwards, only set $query_sj_pos on the 1st match found before the SJ
+					if ((not defined $query_sj_pos) and ($loci_sbjct <= $loci_sbjct_sj)) {
+						$query_sj_pos = $loci_query;
+					}
+				}
 				$loci_sbjct += $inc;
 				$loci_query ++;
 			}
-			
+
 			if (defined $mismatches_raw[$i]) {
 				my @mismatches_current = split '', $mismatches_raw[$i];
 				for my $j (0 .. ($#mismatches_current-1)/2) {
@@ -1871,13 +1915,19 @@ Arguments:
 				}
 			}
 		}
+
 		my $delete_num = 0;
 		$delete_num += scalar (@{$IDM_sbjct{'D'}{$_}}) for keys %{$IDM_sbjct{'D'}};
+		if (not defined $query_sj_pos) {
+			$query_sj_pos = $query_sj_pos_default;
+		}
 		my @sort_match_loci_sbjct = sort {$a*$inc <=> $b*$inc} keys %start_end_match;
+
 		{
 			'query_start' => $start_end_match{$sort_match_loci_sbjct[0]},
 			'query_end' => $start_end_match{$sort_match_loci_sbjct[-1]},
 			'query_ori' => [${$query_2ends_ref}[0],${$query_2ends_ref}[1]],
+			'query_sj_pos' => $query_sj_pos,
 			'subject_start' => $sort_match_loci_sbjct[0],
 			'subject_end' => $sort_match_loci_sbjct[-1],
 			'subject_ori' => [${$sbjct_2ends_ref}[0],${$sbjct_2ends_ref}[1]],
@@ -1886,6 +1936,78 @@ Arguments:
 		};
 	}
 
+	sub process_alignment_details {
+		my ($cigar_ref, $read_start, $read_end, $sj_start, $sj_end, $sj_id) = @_;
+		my ($loci_query, $loci_sbjct) = ($read_start, $sj_start);
+		my ($loci_sbjct_min, $loci_sbjct_max) = ($SJFS_dist_add+1, $SJFS_dist*2+$SJFS_dist_add);
+		my $loci_sbjct_sj = $SJFS_dist_add + $SJFS_dist;
+
+		my $delete_num = 0;
+		my $insert_num = 0;
+		my $mismatch_num = 0;
+		my %start_end_match;
+		my $query_sj_pos = undef;
+		my $query_sj_pos_default = $loci_query;
+
+		my $cigar_len = scalar(@{$cigar_ref});
+		for my $cigar_i (0 .. ($cigar_len - 1)) {
+			my $cigar_num = $cigar_ref->[$cigar_i][0];
+			my $cigar_op = $cigar_ref->[$cigar_i][1];
+			for (1 .. $cigar_num) {
+				my $sbjct_in_sj = ($loci_sbjct_min <= $loci_sbjct and $loci_sbjct <= $loci_sbjct_max);
+				if ($cigar_op eq '=') {
+					if ($sbjct_in_sj) {
+						$start_end_match{$loci_sbjct} = $loci_query;
+					}
+					# Record the last position that matched in the exon before the SJ
+					if ($loci_sbjct <= $loci_sbjct_sj) {
+						$query_sj_pos = $loci_query;
+					}
+					$loci_sbjct ++;
+					$loci_query ++;
+				} elsif ($cigar_op eq 'X') {
+					if ($sbjct_in_sj) {
+						$mismatch_num ++;
+					}
+					$loci_sbjct ++;
+					$loci_query ++;
+				} elsif ($cigar_op eq 'I') {
+					if ($sbjct_in_sj) {
+						$delete_num ++;
+					}
+					$loci_query ++;
+				} elsif ($cigar_op eq 'D') {
+					if ($sbjct_in_sj) {
+						$insert_num ++;
+					}
+					$loci_sbjct ++;
+				} elsif (($cigar_op eq 'S') or ($cigar_op eq 'H')) {
+					$loci_query ++;
+				} else {
+					# M,N,P
+					die "unexpected CIGAR operation $cigar_op for $sj_id";
+				}
+			}
+		}
+
+		if (not defined $query_sj_pos) {
+			$query_sj_pos = $query_sj_pos_default;
+		}
+		my @sort_match_loci_sbjct = sort {$a <=> $b} keys %start_end_match;
+
+		my %alignment_details = ();
+		$alignment_details{'query_start'} = $start_end_match{$sort_match_loci_sbjct[0]};
+		$alignment_details{'query_end'} = $start_end_match{$sort_match_loci_sbjct[-1]};
+		$alignment_details{'query_ori'} = [$read_start, $read_end];
+		$alignment_details{'query_sj_pos'} = $query_sj_pos;
+		$alignment_details{'subject_start'} = $sort_match_loci_sbjct[0];
+		$alignment_details{'subject_end'} = $sort_match_loci_sbjct[-1];
+		$alignment_details{'subject_ori'} = [$sj_start, $sj_end];
+		$alignment_details{'SJ_ID'} = $sj_id;
+		$alignment_details{'IDM'} = [$delete_num, $insert_num, $mismatch_num];
+
+		return \%alignment_details;
+	}
 
 	sub calculate_probability_hypergeometric_IDS {
 		my @IDSM = @{$_[0]};
@@ -2002,6 +2124,114 @@ Arguments:
 		move($tmp_file_path, $orig_file_path) or die "cannot mv $tmp_file_path $orig_file_path: $!";
 	}
 
+	sub remove_prefix_and_suffix {
+		my ($string, $prefix, $suffix) = @_;
+		my $without_prefix = substr($string, length($prefix));
+		return substr($without_prefix, 0, length($without_prefix) - length($suffix));
+	}
+
+	sub parse_sj_group_fa_entry {
+		my ($line_1, $line_2) = @_;
+		# $line_1: >{sj_string} SJclst:{clust_num}: group:{group_num}:
+		# $line_2: {sequence}
+		chomp($line_1);
+		chomp($line_2);
+		my $line_1_trim = substr($line_1, 1); # remove leading >
+		my @line_1_parts = split(/ /, $line_1_trim);
+		my $sj_string = $line_1_parts[0];
+		my $sj_clust_string = $line_1_parts[1];
+		my $group_string = $line_1_parts[2];
+		my $clust_prefix = 'SJclst:';
+		my $clust_suffix = ':';
+		my $sj_clust = &remove_prefix_and_suffix($sj_clust_string, $clust_prefix, $clust_suffix);
+		my $group_prefix = 'group:';
+		my $group_suffix = ':';
+		my $group = &remove_prefix_and_suffix($group_string, $group_prefix, $group_suffix);
+		my %sj_info = ();
+		$sj_info{'sj'} = $sj_string;
+		$sj_info{'clust'} = $sj_clust;
+		$sj_info{'group'} = $group;
+		$sj_info{'seq'} = $line_2;
+
+		return \%sj_info;
+	}
+
+	sub get_sequences_to_align_for_read_id {
+		my ($all_info_read_ref, $last_read, $last_read2extract_ref, $current_cluster_SJ_number, $SJFS_dist_add, $SJFS_dist, $smith_waterman) = @_;
+		my $SJFS_two_plus_add = (2 * $SJFS_dist) + $SJFS_dist_add;
+		my $read_info_ref = ${$all_info_read_ref}[$last_read];
+		my $read_seq_to_align = ${$read_info_ref}{'readSeq'};
+		my $read_length = ${$read_info_ref}{'read_length'};
+		my $notSameStrand = ${$read_info_ref}{'notSameStrand'};
+
+		# Replace parts of the read sequence that are not near an SJ with 'N'.
+		my @sort_pos_SJ = sort {$a <=> $b} keys %{$last_read2extract_ref};
+		for my $i (0 .. $#sort_pos_SJ) {
+			my $pos = $sort_pos_SJ[$i];
+			if ($i == $#sort_pos_SJ) {
+				my $extra_length = $last_read2extract_ref->{$pos}[1-$notSameStrand];
+				if (($extra_length == 0 or ($current_cluster_SJ_number == 1 and $extra_length > 0)) and $pos + $SJFS_two_plus_add < $read_length) {
+					substr($read_seq_to_align, $pos + $SJFS_two_plus_add) = 'N' x ($read_length - $pos - $SJFS_two_plus_add);
+				}
+			} if ( $i == 0 ) {
+				my $extra_length = $last_read2extract_ref->{$pos}[$notSameStrand];
+				if (($extra_length == 0 or ($current_cluster_SJ_number == 1 and $extra_length > 0)) and $pos - $SJFS_two_plus_add > 0 ) {
+					substr($read_seq_to_align, 0, $pos - $SJFS_two_plus_add) = 'N' x ($pos - $SJFS_two_plus_add);
+				}
+			} else {
+				my $prev_pos = $sort_pos_SJ[$i-1];
+				my $replaceable_length = $pos - $prev_pos - 2 * $SJFS_two_plus_add;
+				if ($replaceable_length > 0) {
+					substr($read_seq_to_align, $prev_pos + $SJFS_two_plus_add, $replaceable_length) = 'N' x $replaceable_length;
+				}
+			}
+		}
+
+		if (!$smith_waterman) {
+			return $read_seq_to_align;
+		}
+
+		# Split the sequence into N and non-N segments
+		my @read_seq_segments = ();
+		my $segment_start_i = 0;
+		my $segment_is_N = (substr($read_seq_to_align, 0, 1) eq 'N');
+		for my $seq_i (1 .. ($read_length - 1)) {
+			my $base = substr($read_seq_to_align, $seq_i, 1);
+			my $base_is_N = $base eq 'N';
+			if ($base_is_N == $segment_is_N) {
+				next;
+			}
+			my $segment_length = $seq_i - $segment_start_i;
+			my $segment = substr($read_seq_to_align, $segment_start_i, $segment_length);
+			push @read_seq_segments, $segment;
+			$segment_start_i = $seq_i;
+			$segment_is_N = $base_is_N;
+		}
+		my $segment = substr($read_seq_to_align, $segment_start_i);
+		push @read_seq_segments, $segment;
+
+		# Combine segments together except "long" N-segments
+		my @collapsed_segments = ();
+		push @collapsed_segments, '';
+		for my $segment (@read_seq_segments) {
+			my $segment_length = length($segment);
+			my $segment_is_N = (substr($segment, 0, 1) eq 'N');
+			if ($segment_is_N and ($segment_length > $SJFS_two_plus_add)) {
+				push @collapsed_segments, $segment;
+				push @collapsed_segments, '';
+			} else {
+				$collapsed_segments[-1] = $collapsed_segments[-1] . $segment;
+			}
+		}
+		if ($collapsed_segments[0] eq '') {
+			shift(@collapsed_segments);
+		}
+		if ($collapsed_segments[-1] eq '') {
+			pop(@collapsed_segments);
+		}
+		return \@collapsed_segments;
+	}
+
 	sub run_blast_on_files {
 		my ($sj_file_path, $read_file_path, $out_dir, $same_group_count, $evalue_cor, $summary_data_ref) = @_;
 		my $db_command = "makeblastdb -in $sj_file_path -dbtype nucl -out $out_dir/current_db -title current_db";
@@ -2014,7 +2244,7 @@ Arguments:
 		if ($exit_blast != 0) {
 			warn "Failed to run \"$blast_command\". Exit code is $exit_blast";
 		}
-		$summary_data_ref->{'number_of_blastn_calls'} ++;
+		$summary_data_ref->{'number_of_aligner_calls'} ++;
 	}
 
 	sub estimate_blast_runtime {
@@ -2030,9 +2260,61 @@ Arguments:
 			# 3 second estimate for small inputs
 			return 3;
 		}
-
 		# linear estimate for larger inputs
 		return $amount_of_work * 0.002;
+	}
+
+	sub get_aligner_matrix_pointer {
+		my $match_score = 5;
+		my $mismatch_score = -4;
+		my $score_matrix_p = Parasail::get_score_matrix_p($match_score, $mismatch_score);
+		return $score_matrix_p;
+	}
+
+	sub run_aligner_on_reads_and_sjs {
+		my ($reads_by_id_ref, $sj_array_ref, $summary_data_ref, $aligner_matrix_pointer, $alignments_by_read_ref) = @_;
+		my $gap_open = 8;
+		my $gap_extend = 6;
+
+		while (my ($read_id, $read_segments_ref) = each %{$reads_by_id_ref}) {
+			my $offset_i = 0;
+			for my $read_seq (@{$read_segments_ref}) {
+				my $read_seq_len = length($read_seq);
+				my $segment_has_non_N = ($read_seq =~ m/[^N]/);
+				if (!$segment_has_non_N) {
+					$offset_i += $read_seq_len;
+					next;
+				}
+
+				my $profile_p = Parasail::profile_create_16($read_seq, $read_seq_len, $aligner_matrix_pointer);
+				for my $sj_info (@{$sj_array_ref}) {
+					my $sj_id = $sj_info->{'sj'};
+					my $sj_seq = $sj_info->{'seq'};
+					my $result_p = Parasail::sw_trace_striped_profile_16($profile_p, $sj_seq, length($sj_seq), $gap_open, $gap_extend);
+					$summary_data_ref->{'number_of_aligner_calls'} ++;
+					my $score = Parasail::result_get_score($result_p);
+					my %cigar_info = Parasail::result_get_cigar_info($result_p, $read_seq, $sj_seq, $aligner_matrix_pointer);
+					my @cigar_parts = @{$cigar_info{'parts'}};
+					my $read_start = $cigar_info{'query_start'} + $offset_i;
+					my $sj_start = $cigar_info{'ref_start'};
+					my $read_end = Parasail::result_get_end_query($result_p) + $offset_i;
+					my $sj_end = Parasail::result_get_end_ref($result_p);
+					Parasail::result_free($result_p);
+					my %result_info = ();
+					$result_info{'cigar'} = \@cigar_parts;
+					# Convert from 0-based coordinates to 1-based coordinates.
+					# The code was originally written for blast which outputs 1-based coords.
+					$result_info{'read_start'} = $read_start + 1;
+					$result_info{'sj_start'} = $sj_start + 1;
+					$result_info{'read_end'} = $read_end + 1;
+					$result_info{'sj_end'} = $sj_end + 1;
+					$result_info{'score'} = $score;
+					push @{$alignments_by_read_ref->{$read_id}{$sj_id}}, \%result_info;
+				}
+				Parasail::profile_free($profile_p);
+				$offset_i += $read_seq_len;
+			}
+		}
 	}
 
 	sub wait_for_threads_to_complete_work {
@@ -2110,14 +2392,14 @@ Arguments:
 	sub initialize_summary_data {
 		my $summary_data_ref = $_[0];
 		$summary_data_ref->{'num_reads_output'} = 0;
-		$summary_data_ref->{'num_reads_without_SJs_for_blast'} = 0;
 		$summary_data_ref->{'num_reads_missing_blast_output'} = 0;
+		$summary_data_ref->{'num_reads_without_SJs_to_correct'} = 0;
 		$summary_data_ref->{'number_of_passed_SJ_alignments'} = 0;
 		$summary_data_ref->{'number_of_corrected_SJ_alignments'} = 0;
 		$summary_data_ref->{'number_of_failed_SJ_alignments'} = 0;
 		$summary_data_ref->{'number_of_added_first_SJ_alignments'} = 0;
 		$summary_data_ref->{'number_of_added_last_SJ_alignments'} = 0;
-		$summary_data_ref->{'number_of_blastn_calls'} = 0;
+		$summary_data_ref->{'number_of_aligner_calls'} = 0;
 		$summary_data_ref->{'number_of_nhmmer_calls'} = 0;
 	}
 
@@ -2126,14 +2408,14 @@ Arguments:
 		open(my $summary_handle, '>', $summary_path) or die "cannot write $summary_path: $!";
 		print $summary_handle "$summary_data_ref->{'perl_command'}\n";
 		print $summary_handle "number of reads in output: $summary_data_ref->{'num_reads_output'}\n";
-		print $summary_handle "number of reads without splice junctions to blast: $summary_data_ref->{'num_reads_without_SJs_for_blast'}\n";
 		print $summary_handle "number of reads missing blast output: $summary_data_ref->{'num_reads_missing_blast_output'}\n";
+		print $summary_handle "number of reads without splice junctions to correct: $summary_data_ref->{'num_reads_without_SJs_to_correct'}\n";
 		print $summary_handle "number of passed splice junction alignments: $summary_data_ref->{'number_of_passed_SJ_alignments'}\n";
 		print $summary_handle "number of corrected splice junction alignments: $summary_data_ref->{'number_of_corrected_SJ_alignments'}\n";
 		print $summary_handle "number of failed splice junction alignments: $summary_data_ref->{'number_of_failed_SJ_alignments'}\n";
 		print $summary_handle "number of added first splice junction alignments: $summary_data_ref->{'number_of_added_first_SJ_alignments'}\n";
 		print $summary_handle "number of added last splice junction alignments: $summary_data_ref->{'number_of_added_last_SJ_alignments'}\n";
-		print $summary_handle "number of blastn calls: $summary_data_ref->{'number_of_blastn_calls'}\n";
+		print $summary_handle "number of aligner calls: $summary_data_ref->{'number_of_aligner_calls'}\n";
 		print $summary_handle "number of nhmmer calls: $summary_data_ref->{'number_of_nhmmer_calls'}\n";
 		close $summary_handle;
 	}

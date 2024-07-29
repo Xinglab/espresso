@@ -35,9 +35,29 @@ function write_espresso_path() {
        >> "${SCRIPT_DIR}/snakemake_config.yaml" || return 1
 }
 
+function install_parasail() {
+  local ORIG_DIR="$(pwd)" || return 1
+  cd "${SCRIPT_DIR}" || return 1
+  conda activate "${CONDA_ENV_PREFIX}" || return 1
+
+  local ESPRESSO_PARASAIL_DIR="${SCRIPT_DIR}/../src/Parasail"
+  "${ESPRESSO_PARASAIL_DIR}/build" || return 1
+
+  local PARASAIL_BUILD_SO_PATH="${ESPRESSO_PARASAIL_DIR}/libparasail.so"
+  local PARASAIL_SCRIPTS_SO_PATH="${SCRIPT_DIR}/scripts/libparasail.so"
+  cp "${PARASAIL_BUILD_SO_PATH}" "${PARASAIL_SCRIPTS_SO_PATH}" || return 1
+
+  echo "libparasail_so_path: '${PARASAIL_SCRIPTS_SO_PATH}'" \
+       >> "${SCRIPT_DIR}/snakemake_config.yaml" || return 1
+
+  conda deactivate || return 1
+  cd "${ORIG_DIR}" || return 1
+}
+
 function install() {
   install_conda || return 1
   write_espresso_path || return 1
+  install_parasail || return 1
 }
 
 function main() {

@@ -29,6 +29,10 @@ def all_input(wildcards):
         inputs.update(vis_files)
         inputs.update(vis_dirs)
 
+    if config['output_corrected_sam_files']:
+        inputs['corrected_sam_paths'] = os.path.join(
+            'espresso_out', 'corrected_alignments', 'sam_file_name_mapping.txt')
+
     return inputs
 
 
@@ -416,6 +420,14 @@ rule write_espresso_s_input_file:
             handle.write('{}\n'.format(','.join(sams)))
             handle.write('{}\n'.format(','.join(names)))
 
+
+def run_espresso_s_use_alignment_read_groups_param(wildcards):
+    if config.get('use_alignment_read_groups'):
+        return '--alignment_read_groups'
+
+    return ''
+
+
 rule run_espresso_s:
     input:
         s_input=os.path.join('espresso_out', 'run_espresso_s_input.txt'),
@@ -437,6 +449,7 @@ rule run_espresso_s:
         espresso_s_path=os.path.join(config['espresso_path'], 'ESPRESSO_S.pl'),
         out_dir=lambda wildcards, output: os.path.dirname(output.updated_tsv),
         tmp_dir='espresso_out',
+        use_alignment_read_groups=run_espresso_s_use_alignment_read_groups_param,
     threads: config['espresso_s_threads']
     resources:
         mem_mb=config['espresso_s_mem_gb'] * 1024,
@@ -452,6 +465,7 @@ rule run_espresso_s:
         ' -F {input.fasta}'
         ' -O {params.out_dir}'
         ' -T {threads}'
+        ' {params.use_alignment_read_groups}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
@@ -472,7 +486,6 @@ checkpoint split_s_for_c:
         orig_work_dir=os.path.join('espresso_out', 's_work_dir'),
         new_base_dir=os.path.join('espresso_out', 'c_work_dir'),
         target_reads_per_c=config['target_reads_per_espresso_c_job'],
-        sort_memory_buffer_size='2G',
         num_threads_per_c=config['espresso_c_threads'],
     resources:
         mem_mb=config['split_s_for_c_mem_gb'] * 1024,
@@ -484,7 +497,6 @@ checkpoint split_s_for_c:
         ' --target-reads-per-c {params.target_reads_per_c}'
         ' --num-threads-per-c {params.num_threads_per_c}'
         ' --genome-fasta {input.fasta}'
-        ' --sort-memory-buffer-size {params.sort_memory_buffer_size}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
@@ -492,6 +504,13 @@ checkpoint split_s_for_c:
 def run_espresso_c_out_dir_param(wildcards, input):
     work_dir = os.path.dirname(input.updated_tsv)
     return os.path.join(work_dir, wildcards.updated_tsv_i)
+
+
+def run_espresso_c_use_blast_param(wildcards):
+    if config.get('use_blast'):
+        return '--blast'
+
+    return ''
 
 
 rule run_espresso_c:
@@ -514,6 +533,7 @@ rule run_espresso_c:
         sub_dir_i='0',
         fasta=os.path.join('espresso_out', 'c_work_dir', 'fastas',
                            '{updated_tsv_i}.fa'),
+        use_blast=run_espresso_c_use_blast_param,
     threads: config['espresso_c_threads']
     resources:
         mem_mb=config['espresso_c_mem_gb'] * 1024,
@@ -526,6 +546,7 @@ rule run_espresso_c:
         ' -X {params.sub_dir_i}'
         ' -T {threads}'
         ' {params.keep_temp}'
+        ' {params.use_blast}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
@@ -593,6 +614,54 @@ rule combine_c_summary_files:
         '{params.conda_wrapper} python {params.script}'
         ' --c-base-work-dir {params.c_work_dir}'
         ' --out-path {output.summary}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
+
+def create_corrected_sams_input(wildcards):
+    inputs = combine_c_for_q_input(wildcards)
+    inputs['fasta'] = os.path.join('references', config['fasta_name'])
+    inputs['samples_tsv'] = os.path.join('espresso_out', 'samples.tsv')
+    return inputs
+
+
+def maybe_create_corrected_sams_window_param():
+    window_param = config.get('corrected_sam_aligner_window')
+    if window_param is None:
+        return ''
+
+    return '--aligner-window-size {}'.format(window_param)
+
+
+rule create_corrected_sams:
+    input:
+        unpack(create_corrected_sams_input),
+    output:
+        mapping=os.path.join('espresso_out', 'corrected_alignments',
+                             'sam_file_name_mapping.txt'),
+    log:
+        out=os.path.join('espresso_out', 'create_corrected_sams_log.out'),
+        err=os.path.join('espresso_out', 'create_corrected_sams_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'create_corrected_sam.py'),
+        c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
+        out_dir=lambda wildcards, output: os.path.dirname(output.mapping),
+        parasail_so=config.get('libparasail_so_path'),
+        window_param=maybe_create_corrected_sams_window_param(),
+    threads: config['create_corrected_sams_threads']
+    resources:
+        mem_mb=config['create_corrected_sams_mem_gb'] * 1024,
+        time_hours=config['create_corrected_sams_time_hr'],
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --samples-tsv {input.samples_tsv}'
+        ' --espresso-out-dir {params.c_work_dir}'
+        ' --out-dir {params.out_dir}'
+        ' --fasta {input.fasta}'
+        ' --libparasail-so-path {params.parasail_so}'
+        ' {params.window_param}'
+        ' --num-threads {threads}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 

@@ -12,7 +12,7 @@ use ESPRESSO_Version;
 my $version_number = ESPRESSO_Version::get_version_number();
 my $version_string = "S_$version_number";
 my ($help, $sam, $in, $list_samples, $fa, $anno, $out, $SJ_bed, $read_num_cutoff, $read_ratio_cutoff, $group_extra_range, $num_thread, $mapq_cutoff, $keep_tmp,
-	$cont_del_max, $chrM, $inserted_cont_cutoff, $SJFS_dist, $SJFS_dist_add, $sort_buffer_size);
+	$cont_del_max, $chrM, $inserted_cont_cutoff, $SJFS_dist, $SJFS_dist_add, $sort_buffer_size, $alignment_read_groups);
 
 my $arguments_before_parsing = "@ARGV";
 Getopt::Long::GetOptions (
@@ -38,7 +38,8 @@ Getopt::Long::GetOptions (
 	'inserted_cont_cutoff=i'	=>	\$inserted_cont_cutoff,
 	'SJFS_dist=i'				=>	\$SJFS_dist,
 	'SJFS_dist_add=i'			=>	\$SJFS_dist_add,
-	'sort_buffer_size=s'	=>	\$sort_buffer_size
+	'sort_buffer_size=s'	=>	\$sort_buffer_size,
+	'alignment_read_groups'	=>	\$alignment_read_groups
 
 );
 
@@ -78,7 +79,7 @@ Arguments:
     -R, --read_ratio_cutoff
           min perfect read ratio for denovo detected candidate splice junctions: 
           Set this as 1 for completely GTF-dependent processing (default: 0)
-    
+
     -C, --cont_del_max
           max continuous deletion allowed; intron will be identified if longer
           (default: 50)
@@ -87,11 +88,14 @@ Arguments:
           chrM)
 
     -T, --num_thread
-          thread number (default: minimum of 5 and sam file number)  
+          thread number. At most 1 thread can be used per input alignment file.
+          (default: minimum of 5 and sam file number)
     -Q, --mapq_cutoff
           min mapping quality for processing (default: 1)
     --sort_buffer_size
           memory buffer size for running 'sort' commands (default: 2G)
+    --alignment_read_groups
+          use overlapping alignment coordinates to determine read groups
 
 ";
 } elsif ( !defined($list_samples) or !defined($fa) ) {
@@ -182,6 +186,17 @@ Arguments:
 	}
 	close LIST;
 
+	if (!$alignment_read_groups and !$anno) {
+		push @die_reason, "--anno is required unless --alignment_read_groups\n";
+	}
+
+	# --gtf_read_groups was added to the code as an optional feature.
+	# Now it's the default and --alignment_read_groups enables the old behavior.
+	# $alignment_read_groups is only used for argument parsing.
+	# $gtf_read_groups is used in the remainder of the code.
+	my $gtf_read_groups = !$alignment_read_groups;
+	undef $alignment_read_groups;
+
 	print_with_timestamp(sprintf("Calculating how to assign %g files into %g threads", scalar(keys %sam_size), $num_thread)) if scalar(keys %sam_size) > 1;
 	$num_thread = &min(scalar(keys %sam_size), $num_thread);
 	$sam_distr_ref = &thread_distribution( $num_thread, \%sam_size );
@@ -202,12 +217,8 @@ Arguments:
 
 	my %strand_digit = ('+' => 0, '-' => 1);
 
-	my %splicing_signals = ('0' => {'GT' => 1, 'GC' => 1, 'AG' => -1, 'AT' => 2, 'AC' => -2}, #+
-		'1' => {'CT' => 1, 'AC' => -1, 'GC' => -1, 'GT' => 2, 'AT' => -2});	#-
-
 	my %splicing_signals_strand = ('GTAG' => '0', 'GCAG' => '0', 'ATAC' => '0', 'CTAC' => '1', 'CTGC' => '1', 'GTAT' => '1');
 
-	my $sep_end_blast = '/';
 	my $sep_SJ = ':';
 
 	
@@ -250,35 +261,29 @@ Arguments:
 	if ($num_chr_seqs == 0) {
 		die "No sequence information found in $fa";
 	}
-	# This will be updated later if $anno is read
-	$summary_data{'num_chrs_only_in_fa'} = $num_chr_seqs;
+	# sort chr names to get consistent output
+	my @chr_sort = sort {$a cmp $b} keys %chr_seq;
 
-	#open READ_SUMM, ">", $out."/read_summary.txt" or die "cannot write $out/read_summary.txt: $!";
-
-	if (defined $SJ_bed) {
-		print_with_timestamp("Checking custom splice junction");
-		open BED, "<", $SJ_bed or die "cannot open $SJ_bed: $!";
-		while(<BED>) {
-			chomp;
-			my @line = split /\t/;
-			if (exists $strand_digit{$line[5]}) {
-				if (!exists $chr_seq_len{$line[0]}) {
-					die "Chromosome is not found for $_";
-				} elsif ( $chr_seq_len{$line[0]} <= $line[2] ) {
-					die "Downstream splice site coordinate should be less than chromosome length($chr_seq_len{$line[0]} <= $line[2]): $_";
-				} if ( $line[1]<=0 ) {
-					die "Upstream splice site coordinate should be positive($line[1] <= 0): $_";
-				}
-			} else {
-				die "Strand is not recognized for $_";
-			}
-		}
-		close BED;
+	# $anno_SJ{$chr}{$SJ} = [$strand, $SJ_start, $SJ_end]
+	# where $SJ = chr:start:end:strand
+	#       $SJ_start is the 0-based 1st position of the junction
+	#       $SJ_end is the 1-based last position of the junction
+	my %anno_SJ;
+	my %anno_coords_by_chr_by_gene;
+	if (defined $anno) {
+		print_with_timestamp("Loading annotation");
+		&load_annotation_file($anno, $fa, \%anno_coords_by_chr_by_gene, \%anno_SJ, \%summary_data, \%chr_seq, \%strand_digit, $sep_SJ, $gtf_read_groups);
+	} else {
+		$summary_data{'num_chrs_only_in_fa'} = $num_chr_seqs;
 	}
 
+	if (defined $SJ_bed) {
+		print_with_timestamp("Loading custom splice junction");
+		&load_sj_bed_file($SJ_bed, \%strand_digit, \%chr_seq_len, \%anno_SJ, $sep_SJ);
+	}
+	$summary_data{'num_annotated_splice_junctions'} += (scalar keys %{$anno_SJ{$_}}) for keys %anno_SJ;
 
-	my @output_titles = ('group_ID','line_num','readID','read_length','flag','chr','start','mapq','end','notSameStrand','mappedGenome','clip_ends','exonIntronRef','IDS_SJ_ref','NM_num','insNumBg','delNumBg','substNumBg','totalNumBg','SJcorSeqRef','readSeq'); #'SAM', 
-	my $output_title = join "\t", @output_titles;
+	my @output_titles = ('group_ID','line_num','readID','sample','read_length','flag','chr','start','mapq','end','notSameStrand','mappedGenome','clip_ends','exonIntronRef','IDS_SJ_ref','NM_num','insNumBg','delNumBg','substNumBg','totalNumBg','SJcorSeqRef','readSeq');
 	my %output_titles_ID;
 	$output_titles_ID{$output_titles[$_]} = $_ for 0 .. $#output_titles;
 
@@ -296,6 +301,7 @@ Arguments:
 		$inputs_for_all_threads{'SJFS_dist'} = $SJFS_dist;
 		$inputs_for_all_threads{'chr_seq'} = \%chr_seq;
 		$inputs_for_all_threads{'sep_SJ'} = $sep_SJ;
+		$inputs_for_all_threads{'sam_sample'} = \%sam_sample;
 		my $serialized_inputs_for_all_threads :shared;
 		$serialized_inputs_for_all_threads = freeze(\%inputs_for_all_threads);
 		%inputs_for_all_threads = ();
@@ -316,165 +322,67 @@ Arguments:
 
 	print_with_timestamp("Re-cluster all reads");
 
-	my (%SJ_all_info, %SJ_group);
-	my (@group_sort_update, @group_all_info, %chr_group, %group_sep_in_all);
-
 	my (%group_sep);
 	my @sam_sort = sort {$a <=> $b or $a cmp $b} keys %sam_size;
 
 	for my $sam_file (@sam_sort) {
 		my $num = $file_ID{$sam_file};
 		push @files_ID_sort, $sam_file;
-		my $file_base = substr($sam_file, rindex($sam_file,'/')+1);
 
-		#open OUT, ">", "$out/$file_base.list" or die "cannot write tmp $out/$file_base.list: $!";
-		open GROUP, "<", "$out/$num/group.list" or die "cannot open tmp $out/$num/group.list: $!";
-		#open SJ, "<", "$out/$file_base.sj.list" or die "cannot write tmp $out/$file_base.sj.list: $!";
-
+		my $group_path = "$out/$num/group.list";
+		open GROUP, "<", $group_path or die "cannot open tmp $group_path: $!";
 		while (<GROUP>) {
 			chomp;
 			my @line = split /\t/;
-			$group_sep{$line[1]}{$num.'_'.$line[0]} = [$line[2], $line[3]];
+			my $orig_group_id = $line[0];
+			my $chr = $line[1];
+			my $start = $line[2];
+			my $end = $line[3];
+			$group_sep{$chr}{$num.'_'.$orig_group_id} = [$start, $end];
 		}
 		close GROUP;
 		if (!defined $keep_tmp) {
-			unlink "$out/$num/group.list";
+			unlink $group_path;
 		}
 	}
 
-	# sort by $chr to get a consistent order for read groups
-	my @chr_sort = sort {$a cmp $b} keys %group_sep;
-	for my $chr (@chr_sort) {
-		my $group_ref = $group_sep{$chr};
-		if (keys %{$group_ref} > 0) {
-			my @group_sort = sort {${$group_ref}{$a}[0] <=> ${$group_ref}{$b}[0]} keys %{$group_ref};
-			push @group_sort_update, [$group_sort[0]];
-			push @group_all_info, [${$group_ref}{$group_sort[0]}[0], ${$group_ref}{$group_sort[0]}[1]];
-			$group_sep_in_all{$group_sort[0]} = $#group_sort_update;
-			push @{$chr_group{$chr}}, $#group_sort_update;
-			for my $i (1 .. $#group_sort) {
-				if ( ${$group_ref}{$group_sort[$i]}[0] > $group_all_info[-1][1] ) {
-					push @group_sort_update, [$group_sort[$i]];
-					push @group_all_info, [${$group_ref}{$group_sort[$i]}[0], ${$group_ref}{$group_sort[$i]}[1]];
-					push @{$chr_group{$chr}}, $#group_sort_update;
-				} elsif (${$group_ref}{$group_sort[$i]}[1] > $group_all_info[-1][1]) {
-					push @{$group_sort_update[-1]}, $group_sort[$i];
-					$group_all_info[-1][1] = ${$group_ref}{$group_sort[$i]}[1];
-				} else {
-					push @{$group_sort_update[-1]}, $group_sort[$i];
-				}
-				$group_sep_in_all{$group_sort[$i]} = $#group_sort_update;
-			}
-		}
-		
-	}
-	$summary_data{'number_of_read_groups'} = scalar @group_sort_update;
+	my (@group_all_info, %chr_group, %group_sep_in_all);
+	my $num_read_groups = &finalize_read_groups($gtf_read_groups, \%group_sep, \@group_all_info, \%chr_group, \%group_sep_in_all, \@chr_sort, \%anno_coords_by_chr_by_gene);
+	$summary_data{'number_of_read_groups'} = $num_read_groups;
 
+	my (%SJ_all_info, %SJ_group);
 	for my $sam_file (@sam_sort) {
 		my $num = $file_ID{$sam_file};
-
-		my $file_base = substr($sam_file, rindex($sam_file,'/')+1);
-
 		open SJ, "<", "$out/$num/sj.list" or die "cannot open tmp $out/$num/sj.list: $!";
-
 		while (<SJ>) {
 			chomp;
 			my @line = split /\t/;
-			
-			if (exists $SJ_all_info{$line[1]}) {
-				$SJ_all_info{$line[1]}[3] += $line[5];
-				$SJ_all_info{$line[1]}[4] += $line[6];
+			my $group_id = $line[0];
+			my $sj = $line[1];
+			my $chr = $line[2];
+			my $start = $line[3];
+			my $end = $line[4];
+			my $num_perfect = $line[5];
+			my $num_all = $line[6];
+
+			if (exists $SJ_all_info{$sj}) {
+				$SJ_all_info{$sj}[3] += $num_perfect;
+				$SJ_all_info{$sj}[4] += $num_all;
 			} else {
-				my $n = $group_sep_in_all{$num.'_'.$line[0]};
-				$SJ_all_info{$line[1]} = [$line[2], $line[3], $line[4], $line[5], $line[6]];
-				push @{$SJ_group{$n}}, $line[1];
+				my @possible_groups = &lookup_final_group($num, $group_id, $chr, $start, $end, \%group_sep_in_all, \@group_all_info, \%chr_group, $gtf_read_groups);
+				if (scalar(@possible_groups) > 0) {
+					$SJ_all_info{$sj} = [$chr, $start, $end, $num_perfect, $num_all];
+				}
+				for my $n (@possible_groups) {
+					push @{$SJ_group{$n}}, $sj;
+				}
 			}
 		}
 		close SJ;
 	}
 
-	my (%anno_SJ);
-
-	if (defined $anno) {
-		print_with_timestamp("Loading annotation");
-		my (%anno_exons, %isoform_info, %anno_chr_names);
-		open ANNO, "<", $anno or die "cannot open $anno: $!";
-		while(<ANNO>) {
-			chomp;
-			my @line = split /\t/;
-			next if $line[2] ne 'exon';
-			my ($current_isoform, $current_gene);
-
-			if($line[8] =~ /transcript_id \"(\S+)\"/) {
-				$current_isoform = $1;
-			} else {
-				die "no transcript_id found in $_";
-			}
-			if($line[8] =~ /gene_id \"(\S+)\"/) {
-				$current_gene = $1;
-			} else {
-				die "no transcript_id found in $_";
-			}
-			$isoform_info{$current_isoform} = [$current_gene, $line[6], $line[0]];
-			$anno_exons{$current_isoform}{$line[3]-1} = $line[4];
-			$anno_chr_names{$line[0]} = 1;
-		}
-		close ANNO;
-		my $num_annotated_isoforms = scalar(keys %isoform_info);
-		if ($num_annotated_isoforms == 0) {
-			die "No isoforms found in $anno";
-		}
-		$summary_data{'num_annotated_isoforms'} = $num_annotated_isoforms;
-
-		my $num_chrs_only_in_anno = 0;
-		my $num_chrs_only_in_fa = 0;
-		my $num_chrs_in_anno_and_fa = 0;
-		for my $chr (keys %chr_seq) {
-			if (exists $anno_chr_names{$chr}) {
-				$num_chrs_in_anno_and_fa ++;
-			} else {
-				$num_chrs_only_in_fa ++;
-			}
-		}
-		$num_chrs_only_in_anno = scalar(keys %anno_chr_names) - $num_chrs_in_anno_and_fa;
-
-		if ($num_chrs_in_anno_and_fa == 0) {
-			die "No overlap in chromosome names in $anno and $fa";
-		}
-		$summary_data{'num_chrs_only_in_anno'} = $num_chrs_only_in_anno;
-		$summary_data{'num_chrs_only_in_fa'} = $num_chrs_only_in_fa;
-		$summary_data{'num_chrs_in_anno_and_fa'} = $num_chrs_in_anno_and_fa;
-
-		while (my ($isoform, $exon_start_ref) = each %anno_exons) {
-			my @exon_start_sort = sort {$a <=> $b} keys %{$exon_start_ref};
-			my $strand = $isoform_info{$isoform}[1];
-			my $chr = $isoform_info{$isoform}[2];
-			for my $i (1 .. $#exon_start_sort){
-				my $SJ2_no_strand = $chr.$sep_SJ.${$exon_start_ref}{$exon_start_sort[$i-1]}.$sep_SJ.$exon_start_sort[$i];
-				my $SJ2 = $SJ2_no_strand.$sep_SJ.$strand_digit{$strand};
-				if (!exists $anno_SJ{$chr}{$SJ2}) {
-					$anno_SJ{$chr}{$SJ2} = [$strand_digit{$strand},${$exon_start_ref}{$exon_start_sort[$i-1]},$exon_start_sort[$i]]; #,[$isoform]
-				} 
-			}
-		}
-	}
-	if (defined $SJ_bed) {
-		print_with_timestamp("Loading custom splice junction");
-		open BED, "<", $SJ_bed or die "cannot open $SJ_bed: $!";
-		while(<BED>) {
-			chomp;
-			my @line = split /\t/;
-			my $SJ2 = $line[0].$sep_SJ.$line[1].$sep_SJ.$line[2].$sep_SJ.$strand_digit{$line[5]};
-			$anno_SJ{$line[0]}{$SJ2} = [$strand_digit{$line[5]},$line[1],$line[2]] if !exists $anno_SJ{$line[0]}{$SJ2};
-		}
-		close BED;
-	}
-	$summary_data{'num_annotated_splice_junctions'} += (scalar keys %{$anno_SJ{$_}}) for keys %anno_SJ;
-
 	print_with_timestamp("Summarizing annotated splice junctions for each read group");
 
-	#my %SJ_updated_all;
- 
  	open SJ_FA, ">", $out."/SJ_group_all.fa" or die "cannot write $out/SJ_group_all.fa: $!";
 	while ( my ($chr, $group_ID_ref) = each %chr_group ) {
 		if (length($chr)<=5) {
@@ -482,21 +390,19 @@ Arguments:
 		} else {
 			open SJ2, ">>", "$out/other_SJ_simplified.list" or die "cannot open tmp $out/other_simplified.list: $!";
 		}
-		
-		my %annotated_SJ_group;
+
 		my @annotated_SJ_chr = sort {$anno_SJ{$chr}{$a}[1] <=> $anno_SJ{$chr}{$b}[1] or $anno_SJ{$chr}{$a}[2] <=> $anno_SJ{$chr}{$b}[2]} keys %{$anno_SJ{$chr}};
 
+		my %sj_has_been_counted_in_a_group = ();
 		my $start_SJ_index = 0;
-
 		for my $n (@{$group_ID_ref}) {
-			#my $n = $group_all_info[]
-
+			my @annotated_SJ_group;
 			my ($group_start, $group_end) = ($group_all_info[$n][0], $group_all_info[$n][1]);
 			for my $i ($start_SJ_index .. $#annotated_SJ_chr) {
 				if ($anno_SJ{$chr}{$annotated_SJ_chr[$i]}[1] > $group_end) {
 					last;
 				} elsif ($anno_SJ{$chr}{$annotated_SJ_chr[$i]}[2] >= $group_start and $anno_SJ{$chr}{$annotated_SJ_chr[$i]}[1] <= $group_end) {
-					push @{$annotated_SJ_group{$n}}, $annotated_SJ_chr[$i];
+					push @annotated_SJ_group, $annotated_SJ_chr[$i];
 				} elsif ($anno_SJ{$chr}{$annotated_SJ_chr[$i]}[2] < $group_start){
 					$start_SJ_index = $i;
 				}
@@ -545,11 +451,10 @@ Arguments:
 				
 			}
 
-			for my $SJ2 (@{$annotated_SJ_group{$n}}) {
+			for my $SJ2 (@annotated_SJ_group) {
 				if (!exists $recorded_SJ{$SJ2}) {
 					my ($notSameStrand_SJ, $SJ_start, $SJ_end) = @{$anno_SJ{$chr}{$SJ2}};
 					$SJ_updated{$SJ2} = [$SJ_start, $SJ_end, $notSameStrand_SJ, 0, 0, "TBD", "TBD", 2, "no", "yes", 0];
-					#print SJ2 "$n\t$SJ2\t$chr\t$SJ_start\t$SJ_end\t$notSameStrand_SJ\t0\t0\tTBD\tTBD\tno\tyes\n";
 				}
 			}
 
@@ -585,19 +490,24 @@ Arguments:
 			}
 
 			my @SJ_cluster_r_index_sort = sort { $sorted_SJ_cluster_ends[$a][1] <=> $sorted_SJ_cluster_ends[$b][1] } (0 .. $#sorted_SJ_cluster);
-			#my @SJ_cluster_f_index_sort = sort { $sorted_SJ_cluster_ends[$b][0] <=> $sorted_SJ_cluster_ends[$a][0] } (0 .. $#sorted_SJ_cluster);
 
 			for my $l (0 .. $#SJ_cluster_r_index_sort) {
 				my $index_ori = $SJ_cluster_r_index_sort[$l];
 				my @SJs_current_cluster = @{$sorted_SJ_cluster[$index_ori]};
 				print SJ2 "SJ_cluster\t$n\t$index_ori\t$l\t$chr\t$sorted_SJ_cluster_ends[$index_ori][0]\t$sorted_SJ_cluster_ends[$index_ori][1]\n";
 				for my $SJ2 (@SJs_current_cluster) {
+					my $already_seen = exists $sj_has_been_counted_in_a_group{$SJ2};
+					$sj_has_been_counted_in_a_group{$SJ2} = 1;
 					push @{$SJ_updated{$SJ2}}, $index_ori;
 					my ($SJ_start, $SJ_end, $notSameStrand_SJ, $perfect_count, $all_count, $upstream_2nt, $downstream_2nt, $tag, $isPutative, $isAnno, $isHighConfidence, $cluster_index_ori) = @{$SJ_updated{$SJ2}};
-					$summary_data{'perfect_splice_junction_read_count'} += $perfect_count;
-					$summary_data{'total_splice_junction_read_count'} += $all_count;
+					if (!$already_seen) {
+						$summary_data{'perfect_splice_junction_read_count'} += $perfect_count;
+						$summary_data{'total_splice_junction_read_count'} += $all_count;
+					}
 					if ( $tag == 2 or ($tag == 1 and $perfect_count >= $read_num_cutoff and $perfect_count >= $all_count*$read_ratio_cutoff) ) {
-						$summary_data{'num_high_confidence_splice_junctions'} ++;
+						if (!$already_seen) {
+							$summary_data{'num_high_confidence_splice_junctions'} ++;
+						}
 						$SJ_updated{$SJ2}[-2] = 1;
 						print SJ_FA ">$SJ2 SJclst:$index_ori: group:$n:\n";
 						print SJ_FA substr($chr_seq{$chr}, $SJ_start-$SJFS_dist-$SJFS_dist_add, $SJFS_dist+$SJFS_dist_add).substr($chr_seq{$chr}, $SJ_end, $SJFS_dist+$SJFS_dist_add)."\n";
@@ -605,7 +515,6 @@ Arguments:
 					print SJ2 "$n\t$SJ2\t";
 					print SJ2 "\t$_" for @{$SJ_updated{$SJ2}};
 					print SJ2 "\n";
-					#$SJ_updated_all{$SJ2} = $SJ_updated{$SJ2};
 				}
 
 			}
@@ -620,14 +529,6 @@ Arguments:
 	%chr_seq = ();
 	%anno_SJ = ();
 
-	print "$_($file_ID{$_})\n" for keys %file_ID;
-	my $x = 0;
-	for (keys %group_sep_in_all) {
-		$x ++;
-		last if $x>5;
-		print "$_($group_sep_in_all{$_})\n";
-	}
-
 	{ # limit scope of variables used to pass arguments to threads
 		my %inputs_for_all_threads;
 		$inputs_for_all_threads{'scan_number'} = 2;
@@ -635,6 +536,9 @@ Arguments:
 		$inputs_for_all_threads{'out'} = $out;
 		$inputs_for_all_threads{'output_titles_ID'} = \%output_titles_ID;
 		$inputs_for_all_threads{'group_sep_in_all'} = \%group_sep_in_all;
+		$inputs_for_all_threads{'group_all_info'} = \@group_all_info;
+		$inputs_for_all_threads{'chr_group'} = \%chr_group;
+		$inputs_for_all_threads{'gtf_read_groups'} = $gtf_read_groups;
 		$inputs_for_all_threads{'sep_SJ'} = $sep_SJ;
 		$inputs_for_all_threads{'keep_tmp'} = $keep_tmp;
 		my $serialized_inputs_for_all_threads :shared;
@@ -685,12 +589,98 @@ Arguments:
 		}
 	}
 
+	sub print_read3_lines {
+		my ($pending_lines_ref, $read3_handle, $summary_data_ref) = @_;
+
+		for my $line (@{$pending_lines_ref}) {
+			print $read3_handle $line;
+			$summary_data_ref->{'number_of_reads_output'} ++;
+		}
+		@{$pending_lines_ref} = ();
+	}
+
+	sub print_read3_lines_for_previous_group {
+		my ($group, $pending_group, $pending_lines_ref, $read3_handle, $summary_data_ref) = @_;
+
+		if ((defined $pending_group) and ($pending_group < $group)) {
+			&print_read3_lines($pending_lines_ref, $read3_handle, $summary_data_ref);
+			$pending_group = undef;
+		}
+		return $pending_group;
+	}
+
+	# With $gtf_read_groups a read could be in multiple groups if the coordinates
+	# are between two genes without overlapping either gene.
+	# Output a separate line for each group that the read is assigned to, but
+	# only write lines for a group after all lines for previous groups are written.
+	# This can lead to a read having multiple lines in the --tsv_compt output file.
+	# Also a novel intergenic isoform could be reported in both adjacent groups with
+	# different novel IDs.
+	sub maybe_print_read3_lines {
+		my ($group_id_header_i, $chr, $read_start, $chr_group_ref, $group_all_info_ref, $pending_group, $possible_groups_ref, $pending_lines_ref, $columns_ref, $read3_handle, $summary_data_ref) = @_;
+
+		my $group = $possible_groups_ref->[0];
+		$columns_ref->[$group_id_header_i] = $group;
+		my $out_line = join("\t", @{$columns_ref});
+		$out_line .= "\n";
+
+		my $num_possible = scalar(@{$possible_groups_ref});
+		if ($num_possible > 2) {
+			die "a read is assigned to more than 2 read groups ($num_possible) $out_line";
+		}
+
+		if ($num_possible == 2) {
+			my $group_2 = $possible_groups_ref->[1];
+			$pending_group = &print_read3_lines_for_previous_group($group_2, $pending_group, $pending_lines_ref, $read3_handle, $summary_data_ref);
+
+			print $read3_handle $out_line;
+			$summary_data_ref->{'number_of_reads_output'} ++;
+
+			$columns_ref->[$group_id_header_i] = $group_2;
+			my $out_line_2 = join("\t", @{$columns_ref});
+			$out_line_2 .= "\n";
+
+			push @{$pending_lines_ref}, $out_line_2;
+			$pending_group = $group_2;
+			return $pending_group;
+		}
+
+		my $can_output = 0;
+		my $lowest_chr_group = $chr_group_ref->{$chr}[0];
+		if ($group == $lowest_chr_group) {
+			$can_output = 1;
+		} else {
+			my $prev_group = $group - 1;
+			my $ends_ref = $group_all_info_ref->[$prev_group];
+			my $prev_end = $ends_ref->[1];
+			if ($read_start > $prev_end) {
+				$can_output = 1;
+			}
+		}
+
+		if ($can_output) {
+			# ($group + 1) is used to print any lines for $group
+			$pending_group = &print_read3_lines_for_previous_group($group + 1, $pending_group, $pending_lines_ref, $read3_handle, $summary_data_ref);
+			print $read3_handle $out_line;
+			$summary_data_ref->{'number_of_reads_output'} ++;
+		} else {
+			&print_read3_lines_for_previous_group($group, $pending_group, $pending_lines_ref, $read3_handle, $summary_data_ref);
+			push @{$pending_lines_ref}, $out_line;
+			$pending_group = $group;
+		}
+
+		return $pending_group;
+	}
+
 	sub parallel_scan2 {
 		my ($file, $format, $input_ref, $summary_data_ref) = @{$_[0]};
 		my $file_ID_ref = $input_ref->{'file_ID'};
 		my $out = $input_ref->{'out'};
 		my $output_titles_ID_ref = $input_ref->{'output_titles_ID'};
 		my $group_sep_in_all_ref = $input_ref->{'group_sep_in_all'};
+		my $group_all_info_ref = $input_ref->{'group_all_info'};
+		my $chr_group_ref = $input_ref->{'chr_group'};
+		my $gtf_read_groups = $input_ref->{'gtf_read_groups'};
 		my $sep_SJ = $input_ref->{'sep_SJ'};
 		my $keep_tmp = $input_ref->{'keep_tmp'};
 
@@ -770,16 +760,29 @@ Arguments:
 		close IN;
 
 		open READ, "<", "$out/$num/sam.list" or die "cannot open tmp $out/$num/sam.list: $!";
-		open READ3, ">", "$out/$num/sam.list3" or die "cannot write tmp $out/$num/sam.list3: $!";
+		open(my $read3_handle, '>', "$out/$num/sam.list3") or die "cannot write tmp $out/$num/sam.list3: $!";
 		my ($pre_chr, %SJ_updated_all);
-		#@output_titles
+		my @pending_read3_lines = ();
+		my $pending_read3_lines_group = undef;
 		while (<READ>) {
 			chomp;
 			my @line = split /\t/;
 			next if $line[$output_titles_ID_ref->{'readID'}] eq 'readID';
 			next if exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and $read_info{$line[$output_titles_ID_ref->{'readID'}]}[1] != $line[$output_titles_ID_ref->{'line_num'}];
 			my $chr = $line[$output_titles_ID_ref->{'chr'}];
-			if ($chr ne $pre_chr) {
+			my $orig_group_id = $line[$output_titles_ID_ref->{'group_ID'}];
+			my $read_start = $line[$output_titles_ID_ref->{'start'}];
+			my $read_end = $line[$output_titles_ID_ref->{'end'}];
+			my @possible_groups = &lookup_final_group($num, $orig_group_id, $chr, $read_start, $read_end, $group_sep_in_all_ref, $group_all_info_ref, $chr_group_ref, $gtf_read_groups);
+			if (scalar(@possible_groups) == 0) {
+				$summary_data_ref->{'num_reads_filtered_no_assigned_read_group'} ++;
+				next;
+			}
+
+			if ((!defined($pre_chr)) or ($chr ne $pre_chr)) {
+				&print_read3_lines(\@pending_read3_lines, $read3_handle, $summary_data_ref);
+				$pending_read3_lines_group = undef;
+
 				%SJ_updated_all=();
 				if (length($line[$output_titles_ID_ref->{'chr'}]) <= 5) {
 					open SJ2, "<", "$out/${chr}_SJ_simplified.list" or die "cannot open tmp $out/${chr}_SJ_simplified.list: $!";
@@ -797,7 +800,7 @@ Arguments:
 			}
 
 			$pre_chr = $chr;
-			$line[$output_titles_ID_ref->{'group_ID'}] = $group_sep_in_all_ref->{$num.'_'.$line[$output_titles_ID_ref->{'group_ID'}]};
+
 			if ($line[$output_titles_ID_ref->{'SJcorSeqRef'}] ne 'NA') {
 				my @SJcorSeq_strings = split ',', $line[$output_titles_ID_ref->{'SJcorSeqRef'}];
 				for my $i (0 .. $#SJcorSeq_strings) {
@@ -820,28 +823,26 @@ Arguments:
 				$line[$output_titles_ID_ref->{'SJcorSeqRef'}] = join ',', @SJcorSeq_strings;
 			}
 
-			my $out_line = "";
-			for my $i (0 .. $#line-1) {
-				$out_line .= "$line[$i]\t";
+			if ($line[$output_titles_ID_ref->{'readSeq'}] eq 'NA') {
+				if (exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and defined $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3]) {
+					my $read_seq = $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3];
+					if ($read_seq eq 'short') {
+						$summary_data_ref->{'num_reads_filtered_missing_full_sequence'} ++;
+						next;
+					}
+					$line[$output_titles_ID_ref->{'readSeq'}] = $read_seq;
+				} else {
+					$line[$output_titles_ID_ref->{'readSeq'}] = 'read_not_recorded';
+				}
 			}
 
-			if ( $line[$output_titles_ID_ref->{'readSeq'}] ne 'NA' ) {
-				$out_line .= "$line[-1]\n";
-			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' and exists $read_info{$line[$output_titles_ID_ref->{'readID'}]} and defined $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3] ) {
-				my $read_seq = $read_info{$line[$output_titles_ID_ref->{'readID'}]}[3];
-				if ($read_seq eq 'short') {
-					$summary_data_ref->{'num_reads_filtered_missing_full_sequence'} ++;
-					next;
-				}
-				$out_line .= "$read_seq\n";
-			} elsif ( $line[$output_titles_ID_ref->{'readSeq'}] eq 'NA' ) {
-				$out_line .= "read_not_recorded\n";
-			}
-			print READ3 $out_line;
-			$summary_data_ref->{'number_of_reads_output'} ++;
+			$pending_read3_lines_group = &maybe_print_read3_lines($output_titles_ID_ref->{'group_ID'}, $chr, $read_start, $chr_group_ref, $group_all_info_ref, $pending_read3_lines_group, \@possible_groups, \@pending_read3_lines, \@line, $read3_handle, $summary_data_ref);
 		}
 		close READ;
-		close READ3;
+
+		&print_read3_lines(\@pending_read3_lines, $read3_handle, $summary_data_ref);
+		close $read3_handle;
+		$pending_read3_lines_group = undef;
 
 		if (!defined $keep_tmp){
 			unlink "$out/$num/sam.list";
@@ -862,10 +863,11 @@ Arguments:
 		my $SJFS_dist = $input_ref->{'SJFS_dist'};
 		my $chr_seq_ref = $input_ref->{'chr_seq'};
 		my $sep_SJ = $input_ref->{'sep_SJ'};
+		my $sam_sample_ref = $input_ref->{'sam_sample'};
 
 		my $key_read;
 		my $num = $file_ID_ref->{$file};
-		my $file_base = substr($file, rindex($file,'/')+1);
+		my $sample = $sam_sample_ref->{$file};
 		my $pinhead;
 
 		if ($format eq 'sam') {
@@ -879,8 +881,6 @@ Arguments:
 		open OUT, ">", "$out/$num/sam.list" or die "cannot write tmp $out/$num/sam.list: $!";
 		open GROUP, ">", "$out/$num/group.list" or die "cannot write tmp $out/$num/group.list: $!";
 		open SJ, ">", "$out/$num/sj.list" or die "cannot write tmp $out/$num/sj.list: $!";
-		#open DEFAULT, ">", "$out/$file.out" or die "cannot write tmp $out/$file.out: $!";
-		#print OUT "$output_title\n";
 
 		my (%SJ_read, %group_info, $pre_chr_end, @pre_group);
 		my %processed_chrs = ();
@@ -931,7 +931,7 @@ Arguments:
 				my $end = $line[3]-1;
 				$end += $_ for @{${$msidn}{'exonIntronRef'}};
 				my $out;
-				$out .= "$line[0]\t${$msidn}{'read_length'}\t$line[1]\t$line[2]\t$line[3]\t$line[4]\t$end\t$notSameStrand\t${$msidn}{'mappedGenome'}\t";
+				$out .= "$line[0]\t$sample\t${$msidn}{'read_length'}\t$line[1]\t$line[2]\t$line[3]\t$line[4]\t$end\t$notSameStrand\t${$msidn}{'mappedGenome'}\t";
 				$out .= "$_," for @{${$msidn}{'clip_ends'}};
 				$out .= "\t";
 				my $is_chr_switch = 0;
@@ -1202,7 +1202,7 @@ Arguments:
 									if (@perfect_reads>0){
 										print SJ "$_," for @perfect_reads;
 									} else {
-										print SJ "NA" for @perfect_reads;
+										print SJ "NA" for @perfect_reads; # TODO no for needed
 									}
 									
 									print SJ "\t";
@@ -1214,8 +1214,6 @@ Arguments:
 
 		close GROUP;
 		close SJ;
-		#unlink("$out/$file_base");
-		#close DEFAULT;
 	}
 
 	sub thread_distribution {
@@ -1352,6 +1350,310 @@ Arguments:
 
 	sub hamming_distance{ length( $_[0] ) - ( ($_[0] ^ $_[1]) =~ tr[\0][\0] ) };
 
+	sub load_annotation_file {
+		my ($anno, $fa, $anno_coords_by_chr_by_gene_ref, $anno_SJ_ref, $summary_data_ref, $chr_seq_ref, $strand_digit_ref, $sep_SJ, $gtf_read_groups) = @_;
+		my (%anno_exons, %isoform_info, %anno_chr_names);
+		open(my $anno_handle, '<', $anno ) or die "cannot open $anno: $!";
+		while(<$anno_handle>) {
+			chomp;
+			my @line = split /\t/;
+			next if $line[2] ne 'exon';
+			my ($current_isoform, $current_gene);
+
+			if($line[8] =~ /transcript_id \"(\S+)\"/) {
+				$current_isoform = $1;
+			} else {
+				die "no transcript_id found in $_";
+			}
+			if($line[8] =~ /gene_id \"(\S+)\"/) {
+				$current_gene = $1;
+			} else {
+				die "no transcript_id found in $_";
+			}
+			my $chr = $line[0];
+			my $start = $line[3];  # gtf coords are 1-based
+			my $end = $line[4];
+			my $strand = $line[6];
+			$isoform_info{$current_isoform} = [$current_gene, $strand, $chr];
+			$anno_exons{$current_isoform}{$start - 1} = $end;
+			$anno_chr_names{$chr} = 1;
+			if ($gtf_read_groups) {
+				if (exists $anno_coords_by_chr_by_gene_ref->{$chr}{$current_gene}) {
+					my $gene_coords_ref = $anno_coords_by_chr_by_gene_ref->{$chr}{$current_gene};
+					$gene_coords_ref->[0] = &min($gene_coords_ref->[0], $start);
+					$gene_coords_ref->[1] = &max($gene_coords_ref->[1], $end);
+				} else {
+					$anno_coords_by_chr_by_gene_ref->{$chr}{$current_gene} = [$start, $end];
+				}
+			}
+		}
+		close $anno_handle;
+
+		my $num_annotated_isoforms = scalar(keys %isoform_info);
+		if ($num_annotated_isoforms == 0) {
+			die "No isoforms found in $anno";
+		}
+		$summary_data_ref->{'num_annotated_isoforms'} = $num_annotated_isoforms;
+
+		my $num_chrs_only_in_anno = 0;
+		my $num_chrs_only_in_fa = 0;
+		my $num_chrs_in_anno_and_fa = 0;
+		for my $chr (keys %{$chr_seq_ref}) {
+			if (exists $anno_chr_names{$chr}) {
+				$num_chrs_in_anno_and_fa ++;
+			} else {
+				$num_chrs_only_in_fa ++;
+			}
+		}
+		$num_chrs_only_in_anno = scalar(keys %anno_chr_names) - $num_chrs_in_anno_and_fa;
+
+		if ($num_chrs_in_anno_and_fa == 0) {
+			die "No overlap in chromosome names in $anno and $fa";
+		}
+		$summary_data_ref->{'num_chrs_only_in_anno'} = $num_chrs_only_in_anno;
+		$summary_data_ref->{'num_chrs_only_in_fa'} = $num_chrs_only_in_fa;
+		$summary_data_ref->{'num_chrs_in_anno_and_fa'} = $num_chrs_in_anno_and_fa;
+
+		while (my ($isoform, $exon_start_ref) = each %anno_exons) {
+			my @exon_start_sort = sort {$a <=> $b} keys %{$exon_start_ref};
+			my $strand = $isoform_info{$isoform}[1];
+			my $chr = $isoform_info{$isoform}[2];
+			for my $i (1 .. $#exon_start_sort){
+				my $prev_exon_end = ${$exon_start_ref}{$exon_start_sort[$i-1]};
+				my $exon_start = $exon_start_sort[$i];
+				my $SJ2_no_strand = $chr.$sep_SJ.$prev_exon_end.$sep_SJ.$exon_start;
+				my $SJ2 = $SJ2_no_strand.$sep_SJ.$strand_digit_ref->{$strand};
+				if (!exists $anno_SJ_ref->{$chr}{$SJ2}) {
+					$anno_SJ_ref->{$chr}{$SJ2} = [$strand_digit_ref->{$strand},$prev_exon_end,$exon_start];
+				}
+			}
+		}
+	}
+
+	sub load_sj_bed_file {
+		my ($SJ_bed, $strand_digit_ref, $chr_seq_len_ref, $anno_SJ_ref, $sep_SJ) = @_;
+		open(my $bed_handle, '<', $SJ_bed) or die "cannot open $SJ_bed: $!";
+		while(<$bed_handle>) {
+			chomp;
+			my @line = split /\t/;
+			my $chr = $line[0];
+			my $sj_start = $line[1];
+			my $sj_end = $line[2];
+
+			if (!exists $strand_digit_ref->{$line[5]}) {
+				die "Strand is not recognized for $_";
+			}
+			my $strand = $strand_digit_ref->{$line[5]};
+
+			if (!exists $chr_seq_len_ref->{$chr}) {
+				die "Chromosome is not found for $_";
+			}
+			if ($chr_seq_len_ref->{$chr} <= $sj_end) {
+				die "Downstream splice site coordinate should be less than chromosome length($chr_seq_len_ref->{$chr} <= $sj_end): $_";
+			}
+			if ($sj_start <= 0) {
+				die "Upstream splice site coordinate should be positive($sj_start <= 0): $_";
+			}
+
+			my $SJ2 = $chr.$sep_SJ.$sj_start.$sep_SJ.$sj_end.$sep_SJ.$strand;
+			$anno_SJ_ref->{$chr}{$SJ2} = [$strand_digit_ref->{$line[5]},$sj_start,$sj_end] if !exists $anno_SJ_ref->{$chr}{$SJ2};
+		}
+		close $bed_handle;
+	}
+
+	sub create_coordinate_groups_for_genes {
+		my ($anno_coords_by_gene_ref, $anno_gene_groups_ref, $gene_group_i_offset) = @_;
+		my $gene_group_i = $gene_group_i_offset;
+		my @gene_sort = sort {
+			my $a_coords = $anno_coords_by_gene_ref->{$a};
+			my $a_start = $a_coords->[0];
+			my $a_end = $a_coords->[1];
+			my $b_coords = $anno_coords_by_gene_ref->{$b};
+			my $b_start = $b_coords->[0];
+			my $b_end = $b_coords->[1];
+			($a_start <=> $b_start) or ($a_end <=> $b_end);
+		} keys %{$anno_coords_by_gene_ref};
+
+		for my $gene_id (@gene_sort) {
+			my $gene_coords_ref = $anno_coords_by_gene_ref->{$gene_id};
+			my $gene_start = $gene_coords_ref->[0];
+			my $gene_end = $gene_coords_ref->[1];
+			if (!exists $anno_gene_groups_ref->{$gene_group_i}) {
+				$anno_gene_groups_ref->{$gene_group_i} = [$gene_start, $gene_end];
+			} else {
+				my $old_group_coords_ref = $anno_gene_groups_ref->{$gene_group_i};
+				if ($gene_start > $old_group_coords_ref->[1]) {
+					$gene_group_i ++;
+					$anno_gene_groups_ref->{$gene_group_i} = [$gene_start, $gene_end];
+				} elsif ($gene_end > $old_group_coords_ref->[1]) {
+					$anno_gene_groups_ref->{$gene_group_i}->[1] = $gene_end;
+				}
+			}
+		}
+	}
+
+	sub finalize_read_groups {
+		my ($gtf_read_groups, $group_sep_ref, $group_all_info_ref, $chr_group_ref, $group_sep_in_all_ref, $chr_sort_ref, $anno_coords_by_chr_by_gene_ref) = @_;
+		my $gene_group_i = 0;
+		for my $chr (@{$chr_sort_ref}) {
+			my $orig_group_ref = $group_sep_ref->{$chr};
+			if (keys %{$orig_group_ref} == 0) {
+				next;
+			}
+
+			my @orig_group_sort = sort {
+				my $a_coords = $orig_group_ref->{$a};
+				my $a_start = $a_coords->[0];
+				my $a_end = $a_coords->[1];
+				my $b_coords = $orig_group_ref->{$b};
+				my $b_start = $b_coords->[0];
+				my $b_end = $b_coords->[1];
+				($a_start <=> $b_start) or ($a_end <=> $b_end);
+			} keys %{$orig_group_ref};
+
+			if ($gtf_read_groups) {
+				my $anno_coords_by_gene_ref = $anno_coords_by_chr_by_gene_ref->{$chr};
+				# Only create groups if there are annotated genes for this $chr
+				if (keys %{$anno_coords_by_gene_ref} == 0) {
+					next;
+				}
+				my %anno_gene_groups;
+				# The offset lets this chr start with the next available group_i.
+				my $gene_group_i_offset = $gene_group_i;
+				&create_coordinate_groups_for_genes($anno_coords_by_gene_ref, \%anno_gene_groups, $gene_group_i_offset);
+				my $highest_coord_used_for_chr = $orig_group_ref->{$orig_group_sort[-1]}[1];
+
+				my $orig_group_i = 0;
+				my @sorted_gene_groups = sort {$a <=> $b} keys %anno_gene_groups;
+				for my $sort_i (0 .. $#sorted_gene_groups) {
+					$gene_group_i = $sorted_gene_groups[$sort_i];
+					my $group_coords_ref = $anno_gene_groups{$gene_group_i};
+					my $group_start = $group_coords_ref->[0];
+					my $group_end = $group_coords_ref->[1];
+
+					# The space between gene groups is added to each adjacent gene group.
+					# The first gene group starts at 0.
+					# The last gene group ends at $highest_coord_used_for_chr.
+					my $is_last_gene_group_for_chr = $sort_i == $#sorted_gene_groups;
+					if ($is_last_gene_group_for_chr) {
+						$group_end = $highest_coord_used_for_chr;
+					} else {
+						my $next_gene_group_i = $sorted_gene_groups[$sort_i + 1];
+						my $next_group_coords_ref = $anno_gene_groups{$next_gene_group_i};
+						my $next_group_start = $next_group_coords_ref->[0];
+						$group_end = $next_group_start - 1;
+					}
+					if ($sort_i == 0) {
+						$group_start = 0;
+					} else {
+						my $prev_gene_group_i = $sorted_gene_groups[$sort_i - 1];
+						my $prev_group_coords_ref = $anno_gene_groups{$prev_gene_group_i};
+						my $prev_group_end = $prev_group_coords_ref->[1];
+						$group_start = $prev_group_end + 1;
+					}
+
+					push @{$group_all_info_ref}, [$group_start, $group_end];
+					push @{$chr_group_ref->{$chr}}, $gene_group_i;
+
+					while ($orig_group_i < scalar(@orig_group_sort)) {
+						my $orig_group_id = $orig_group_sort[$orig_group_i];
+						my $orig_group_coord_ref = $orig_group_ref->{$orig_group_id};
+						my $orig_group_start = $orig_group_coord_ref->[0];
+						my $orig_group_end = $orig_group_coord_ref->[1];
+						# Each original group is assigned to the gene-based group
+						# that contains the original group start.
+						if (($group_start <= $orig_group_start) and ($orig_group_start <= $group_end)) {
+							$group_sep_in_all_ref->{$orig_group_id} = $gene_group_i;
+							$orig_group_i ++;
+						} else {
+							last;
+						}
+					}
+				}
+				$gene_group_i ++;
+			} else {
+				my $first_group_id = $orig_group_sort[0];
+				my $first_group_ref = ${$orig_group_ref}{$first_group_id};
+				push @{$group_all_info_ref}, [$first_group_ref->[0], $first_group_ref->[1]];
+				$group_sep_in_all_ref->{$first_group_id} = $gene_group_i;
+				push @{$chr_group_ref->{$chr}}, $gene_group_i;
+				for my $group_id (@orig_group_sort) {
+					my $group_start = ${$orig_group_ref}{$group_id}[0];
+					my $group_end = ${$orig_group_ref}{$group_id}[1];
+					my $working_group_end = $group_all_info_ref->[-1][1];
+					if ($group_start > $working_group_end) {
+						$gene_group_i ++;
+						push @{$group_all_info_ref}, [$group_start, $group_end];
+						push @{$chr_group_ref->{$chr}}, $gene_group_i;
+					} elsif ($group_end > $working_group_end) {
+						$group_all_info_ref->[-1][1] = $group_end;
+					}
+					$group_sep_in_all_ref->{$group_id} = $gene_group_i;
+				}
+				$gene_group_i ++;
+			}
+		}
+
+		my $total_groups = @{$group_all_info_ref};
+		return $total_groups;
+	}
+
+	sub lookup_final_group {
+		my ($file_num, $orig_group_id, $chr, $start, $end, $group_sep_in_all_ref, $group_all_info_ref, $chr_group_ref, $gtf_read_groups) = @_;
+
+		my @possible_groups = ();
+		my $lookup_key = $file_num.'_'.$orig_group_id;
+		if (!exists $group_sep_in_all_ref->{$lookup_key}) {
+			return @possible_groups;
+		}
+
+		my $group_id = $group_sep_in_all_ref->{$lookup_key};
+		if (!$gtf_read_groups) {
+			push @possible_groups, $group_id;
+			return @possible_groups;
+		}
+
+		# $group_id corresponds to the gene-based group that contains the
+		# original group start. Use $group_id as a starting point to search
+		# @group_all_info for a gene-based group that contains [$start, $end].
+		my $lower_limit = $group_id;
+		my $upper_limit = $chr_group_ref->{$chr}[-1];
+		while ($lower_limit <= $upper_limit) {
+			my $group_coords_ref = $group_all_info_ref->[$group_id];
+			my $group_start = $group_coords_ref->[0];
+			my $group_end = $group_coords_ref->[1];
+			my $any_check_failed = 0;
+			if ($group_start > $start) {
+				$any_check_failed = 1;
+				$upper_limit = $group_id - 1;
+			}
+			if ($group_end < $end) {
+				$any_check_failed = 1;
+				$lower_limit = $group_id + 1;
+			}
+			if (!$any_check_failed) {
+				push @possible_groups, $group_id;
+				# [$start, $end] could be in the shared region between two groups.
+				my @additional_checks = (($group_id - 1), ($group_id + 1));
+				for $group_id (@additional_checks) {
+					if ($lower_limit <= $group_id and $group_id <= $upper_limit) {
+						$group_coords_ref = $group_all_info_ref->[$group_id];
+						$group_start = $group_coords_ref->[0];
+						$group_end = $group_coords_ref->[1];
+						if ($group_start <= $start and $end <= $group_end) {
+							push @possible_groups, $group_id;
+						}
+					}
+				}
+				last;
+			}
+			$group_id = int(($lower_limit + $upper_limit) / 2);
+		}
+
+		@possible_groups = sort {$a <=> $b} @possible_groups;
+		return @possible_groups;
+	}
+
 	sub thread_work_loop {
 		my ($input_queue, $output_queue) = @{$_[0]};
 
@@ -1471,6 +1773,7 @@ Arguments:
 		$summary_data_ref->{'number_of_alignments_filtered_for_max_insertion'} = 0;
 		$summary_data_ref->{'number_of_alignments_filtered_for_exceeding_chr_coordinates'} = 0;
 		$summary_data_ref->{'num_reads_filtered_missing_full_sequence'} = 0;
+		$summary_data_ref->{'num_reads_filtered_no_assigned_read_group'} = 0;
 	}
 
 	sub write_summary_file {
@@ -1493,6 +1796,7 @@ Arguments:
 		print $summary_handle "number of alignments filtered for a long insertion: $summary_data_ref->{'number_of_alignments_filtered_for_max_insertion'}\n";
 		print $summary_handle "number of alignments filtered for unrecognized coordinates: $summary_data_ref->{'number_of_alignments_filtered_for_exceeding_chr_coordinates'}\n";
 		print $summary_handle "number of reads filtered for missing full sequence: $summary_data_ref->{'num_reads_filtered_missing_full_sequence'}\n";
+		print $summary_handle "number of reads filtered for not being matched to a read group: $summary_data_ref->{'num_reads_filtered_no_assigned_read_group'}\n";
 		close $summary_handle;
 	}
 

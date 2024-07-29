@@ -1,0 +1,16 @@
+Parasail version 0.01
+=====================
+
+Build
+* Copy parasail.h from parasail/
+* Copy libparasail.so from parasail/build/
+* perl Makefile.PL
+* make
+* cp libparasail.so ./blib/lib/
+* make test
+
+Install
+# instead of: make install
+* cp ./blib/lib/Parasail.pm ../
+* cp ./blib/arch/auto/Parasail/Parasail.so ../
+* cp ./libparasail.so ../

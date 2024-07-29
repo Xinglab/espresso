@@ -2,7 +2,6 @@ import argparse
 import os
 import os.path
 import shutil
-import subprocess
 
 OTHER_CHR_NAME = 'other'
 
@@ -30,11 +29,6 @@ def parse_args():
     parser.add_argument('--genome-fasta',
                         required=True,
                         help='the .fa file to use as input to ESPRESSO')
-    parser.add_argument(
-        '--sort-memory-buffer-size',
-        default='2G',
-        help='how much memory "sort" is allowed to use. Specified as {num_gb}G'
-    )
 
     return parser.parse_args()
 
@@ -44,18 +38,6 @@ def chr_name_from_chr_groups(chr_name, chr_groups):
         return chr_name
 
     return OTHER_CHR_NAME
-
-
-def convert_to_sam_if_needed(orig_path, temp_dir, sam_i):
-    was_converted = False
-    if orig_path.endswith('.sam'):
-        return orig_path, was_converted
-
-    was_converted = True
-    new_path = os.path.join(temp_dir, '{}.sam'.format(sam_i))
-    command = ['samtools', 'view', '-o', new_path, orig_path]
-    subprocess.run(command, check=True)
-    return new_path, was_converted
 
 
 def sam_list_path_from_c_dir_path(path):
@@ -72,66 +54,25 @@ def sj_simplified_from_work_dir_and_chr(path, chr_name, chr_groups):
     return os.path.join(path, sj_simplified_name)
 
 
-def split_read_ids_from_temp_file(temp_path, sam_dir, new_c_dir_i,
-                                  new_samples_handle, sort_memory_buffer_size):
-    temp_sorted_path = os.path.join(sam_dir,
-                                    '{}_read_id.sorted'.format(new_c_dir_i))
-    sort_command = [
-        'sort',
-        temp_path,
-        '--output',
-        temp_sorted_path,
-        '--temporary-directory',
-        sam_dir,
-        '--buffer-size',
-        sort_memory_buffer_size,
-    ]
-    os.environ['LC_ALL'] = 'C'  # ensure standard sorting behavior
-    subprocess.run(sort_command, check=True)
-    os.remove(temp_path)
-
-    current_sample = None
-    out_handle = None
-    try:
-        with open(temp_sorted_path, 'rt') as in_handle:
-            for line in in_handle:
-                columns = line.strip().split('\t')
-                sample = columns[0]
-                read_id = columns[1]
-                if current_sample != sample:
-                    current_sample = sample
-                    if out_handle:
-                        out_handle.close()
-
-                    out_path = os.path.join(
-                        sam_dir, '{}_{}.sam'.format(new_c_dir_i, sample))
-                    out_handle = open(out_path, 'wt')
-                    new_samples_handle.write('{}\t{}\t{}\n'.format(
-                        out_path, sample, new_c_dir_i))
-
-                # ESPRESSO_Q expects out_handle to be a sam file where
-                # read_id is the first of many tab separated columns.
-                # Write a tab to allow ESPRESSO_Q to parse the read_id
-                out_handle.write('{}\t\n'.format(read_id))
-    finally:
-        if out_handle:
-            out_handle.close()
-
-    os.remove(temp_sorted_path)
+# ESPRESSO_Q just needs the samples.tsv to have at least
+# 1 entry for each c dir and 1 entry for each sample.
+def add_new_samples_entries(new_c_dir_i, samples, new_samples_handle):
+    for sample in samples:
+        fake_sam_path = '{}_{}.sam'.format(new_c_dir_i, sample)
+        new_samples_handle.write('{}\t{}\t{}\n'.format(fake_sam_path, sample,
+                                                       new_c_dir_i))
 
 
-def split_files_to_new_c_dirs(orig_info_by_c_dir, new_base_dir,
-                              new_samples_path, target_reads_per_c,
-                              num_threads_per_c, chr_groups, fasta_dir,
-                              fasta_index, genome_fasta, sam_dir,
-                              sorted_copy_dir, indices_by_path,
-                              sort_memory_buffer_size, read_id_to_sample):
+def split_files_to_new_c_dirs(sample_by_c_dir, new_base_dir, new_samples_path,
+                              target_reads_per_c, num_threads_per_c,
+                              chr_groups, fasta_dir, fasta_index, genome_fasta,
+                              sorted_copy_dir, indices_by_path):
     new_c_dir_details = {'all_dirs': list(), 'partial_dirs': list()}
     target_per_thread = target_reads_per_c // num_threads_per_c
     orig_sj_group_path = sj_group_all_from_work_dir(sorted_copy_dir)
     sj_group_index = indices_by_path[orig_sj_group_path]
     read_count_details = get_read_counts_by_chr_by_group(
-        orig_info_by_c_dir, sorted_copy_dir, indices_by_path)
+        sample_by_c_dir, sorted_copy_dir, indices_by_path)
     read_counts_by_chr_by_group = (
         read_count_details['read_counts_by_chr_by_group'])
     c_dirs_by_group = read_count_details['c_dirs_by_group']
@@ -143,18 +84,16 @@ def split_files_to_new_c_dirs(orig_info_by_c_dir, new_base_dir,
             split_files_to_new_c_dirs_for_group(
                 chr_name, group, c_dirs, new_base_dir, target_reads_per_c,
                 target_per_thread, chr_groups, fasta_dir, fasta_index,
-                genome_fasta, sam_dir, sorted_copy_dir, indices_by_path,
+                genome_fasta, sorted_copy_dir, indices_by_path,
                 new_c_dir_details, orig_sj_group_path, sj_group_index,
-                read_id_to_sample)
+                sample_by_c_dir)
 
         cleanup_partials_after_group(new_c_dir_details, target_reads_per_c)
 
     with open(new_samples_path, 'wt') as new_samples_handle:
         for details in new_c_dir_details['all_dirs']:
-            split_read_ids_from_temp_file(details['temp_read_id_path'],
-                                          sam_dir, details['dir_i'],
-                                          new_samples_handle,
-                                          sort_memory_buffer_size)
+            add_new_samples_entries(details['dir_i'], details['samples'],
+                                    new_samples_handle)
 
     new_c_sub_dir_paths = list()
     for details in new_c_dir_details['all_dirs']:
@@ -173,14 +112,12 @@ def cleanup_partials_after_group(new_c_dir_details, target_reads_per_c):
 
 
 def get_available_new_c_dir(new_c_dir_details, num_partials_out_for_group,
-                            new_base_dir, sam_dir):
+                            new_base_dir):
     partial_dirs = new_c_dir_details['partial_dirs']
     if not partial_dirs or (len(partial_dirs) <= num_partials_out_for_group):
         new_i = len(new_c_dir_details['all_dirs'])
         new_dir_path = os.path.join(new_base_dir, str(new_i))
         new_sub_dir_path = os.path.join(new_dir_path, '0')
-        temp_read_id_path = os.path.join(sam_dir,
-                                         '{}_read_id.tmp'.format(new_i))
         new_dir = {
             'dir_i': new_i,
             'chrs': list(),
@@ -188,7 +125,7 @@ def get_available_new_c_dir(new_c_dir_details, num_partials_out_for_group,
             'read_count_by_group': dict(),
             'dir_path': new_dir_path,
             'sub_dir_path': new_sub_dir_path,
-            'temp_read_id_path': temp_read_id_path,
+            'samples': set(),
         }
         new_c_dir_details['all_dirs'].append(new_dir)
         partial_dirs.append(new_dir)
@@ -201,11 +138,12 @@ def get_available_new_c_dir(new_c_dir_details, num_partials_out_for_group,
 def split_files_to_new_c_dirs_for_group(
         chr_name, group, c_dirs, new_base_dir, target_reads_per_c,
         target_per_thread, chr_groups, fasta_dir, fasta_index, genome_fasta,
-        sam_dir, sorted_copy_dir, indices_by_path, new_c_dir_details,
-        orig_sj_group_path, sj_group_index, read_id_to_sample):
+        sorted_copy_dir, indices_by_path, new_c_dir_details,
+        orig_sj_group_path, sj_group_index, sample_by_c_dir):
     num_partials_out_for_group = 0
     current_new_c_dir_details = None
     for c_dir in c_dirs:
+        sample = sample_by_c_dir[c_dir]
         c_dir_path = os.path.join(sorted_copy_dir, c_dir)
         orig_sam_list_path = sam_list_path_from_c_dir_path(c_dir_path)
         orig_sj_simplified_path = sj_simplified_from_work_dir_and_chr(
@@ -219,7 +157,7 @@ def split_files_to_new_c_dirs_for_group(
                 if current_new_c_dir_details is None:
                     current_new_c_dir_details = get_available_new_c_dir(
                         new_c_dir_details, num_partials_out_for_group,
-                        new_base_dir, sam_dir)
+                        new_base_dir)
                     append_sj_group_lines_for_group(group, orig_sj_group_path,
                                                     sj_group_index,
                                                     current_new_c_dir_details)
@@ -243,8 +181,7 @@ def split_files_to_new_c_dirs_for_group(
                                         remaining_per_thread)
                 count_to_write = min(remaining_reads_in_c, remaining_for_new)
                 append_sam_lines_for_group(count_to_write, in_sam_handle,
-                                           current_new_c_dir_details,
-                                           read_id_to_sample)
+                                           current_new_c_dir_details, sample)
                 remaining_reads_in_c -= count_to_write
                 current_new_c_dir_details['read_count'] += count_to_write
                 new_count_by_group[group] = (count_by_group_value +
@@ -307,23 +244,14 @@ def append_fasta_lines_for_chr(chr_name, genome_fasta, fasta_index,
 
 
 def append_sam_lines_for_group(count_to_write, in_sam_handle,
-                               current_new_c_dir_details, read_id_to_sample):
+                               current_new_c_dir_details, sample):
+    current_new_c_dir_details['samples'].add(sample)
     sub_dir_path = current_new_c_dir_details['sub_dir_path']
     new_sam_path = sam_list_path_from_c_dir_path(sub_dir_path)
-    temp_path = current_new_c_dir_details['temp_read_id_path']
     with open(new_sam_path, 'at') as out_sam_handle:
-        with open(temp_path, 'at') as out_id_handle:
-            for line_i in range(count_to_write):
-                line = in_sam_handle.readline()
-                columns = line.rstrip('\n').split('\t')
-                read_id = columns[2]
-                sample = read_id_to_sample.get(read_id)
-                if not sample:
-                    raise Exception(
-                        'read id with unknown sample: {}'.format(line))
-
-                out_sam_handle.write(line)
-                out_id_handle.write('{}\t{}\n'.format(sample, read_id))
+        for line_i in range(count_to_write):
+            line = in_sam_handle.readline()
+            out_sam_handle.write(line)
 
 
 def sort_chrs_and_groups(read_counts_by_chr_by_group):
@@ -350,11 +278,11 @@ def sort_chrs_and_groups(read_counts_by_chr_by_group):
     return sorted_chrs, sorted_groups_by_chr
 
 
-def get_read_counts_by_chr_by_group(orig_info_by_c_dir, sorted_copy_dir,
+def get_read_counts_by_chr_by_group(sample_by_c_dir, sorted_copy_dir,
                                     indices_by_path):
     read_counts_by_chr_by_group = dict()
     c_dirs_by_group = dict()
-    for c_dir_name in orig_info_by_c_dir.keys():
+    for c_dir_name in sample_by_c_dir.keys():
         c_dir_path = os.path.join(sorted_copy_dir, c_dir_name)
         sam_list_path = sam_list_path_from_c_dir_path(c_dir_path)
         index = indices_by_path[sam_list_path]
@@ -384,7 +312,7 @@ def get_read_counts_by_chr_by_group(orig_info_by_c_dir, sorted_copy_dir,
     }
 
 
-def copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, orig_info_by_c_dir):
+def copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, sample_by_c_dir):
     # Write the lines from the original sj.list files to the new_c_sub_dirs.
     # The distribution among dirs doesn't matter because ESPRESSO_Q will combine them.
     # Each new dir needs at least 1 line to avoid a warning.
@@ -394,7 +322,7 @@ def copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, orig_info_by_c_dir):
     new_c_sub_dir = new_c_sub_dirs[new_c_sub_dir_i]
     try:
         new_sj_list_handle = open(os.path.join(new_c_sub_dir, 'sj.list'), 'wt')
-        for c_dir in orig_info_by_c_dir.keys():
+        for c_dir in sample_by_c_dir.keys():
             sj_list_path = os.path.join(orig_work_dir, c_dir, 'sj.list')
             with open(sj_list_path, 'rt') as in_handle:
                 for line in in_handle:
@@ -410,55 +338,21 @@ def copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, orig_info_by_c_dir):
             new_sj_list_handle.close()
 
 
-def get_read_id_to_sample(info_by_c_dir, temp_bam_to_sam_dir):
-    read_id_to_sample = dict()
-    sam_i = 0
-    for sample_by_sam in info_by_c_dir.values():
-        for sam_or_bam, sample in sample_by_sam.items():
-            sam, was_converted = convert_to_sam_if_needed(
-                sam_or_bam, temp_bam_to_sam_dir, sam_i)
-            sam_i += 1
-            with open(sam, 'rt') as handle:
-                for line in handle:
-                    if line.startswith('@'):
-                        continue
-
-                    columns = line.strip().split('\t')
-                    read_id = columns[0]
-                    old_sample = read_id_to_sample.get(read_id)
-                    if old_sample and old_sample != sample:
-                        raise Exception(
-                            'conflicting sample names for read id: {} {} {}'.
-                            format(read_id, old_sample, sample))
-
-                    read_id_to_sample[read_id] = sample
-
-            if was_converted:
-                os.remove(sam)
-
-    return read_id_to_sample
-
-
 def parse_orig_samples(samples_path):
-    info_by_c_dir = dict()
+    sample_by_c_dir = dict()
     with open(samples_path, 'rt') as handle:
         for line in handle:
             columns = line.strip().split('\t')
             sam, sample, c_dir_num = columns
-            c_dir_info = info_by_c_dir.get(c_dir_num)
-            if not c_dir_info:
-                c_dir_info = dict()
-                info_by_c_dir[c_dir_num] = c_dir_info
-
-            old_sample_name = c_dir_info.get(sam)
-            if not old_sample_name:
-                c_dir_info[sam] = sample
-            elif old_sample_name != sample:
+            old_sample_name = sample_by_c_dir.get(c_dir_num)
+            if old_sample_name is not None and old_sample_name != sample:
                 raise Exception(
-                    'c dir has conflicting info for sam: {} {} {}'.format(
-                        sam, old_sample_name, sample))
+                    'c dir has multiple sample names: {} {} {} {}'.format(
+                        c_dir_num, sam, sample, old_sample_name))
 
-    return info_by_c_dir
+            sample_by_c_dir[c_dir_num] = sample
+
+    return sample_by_c_dir
 
 
 def sort_by_chr_read_orig(orig_path, line_to_chr_and_group, length_by_group,
@@ -564,7 +458,7 @@ def sj_group_all_line_to_chr_and_group(line):
 def sam_list_line_to_chr_and_group(line):
     columns = line.strip().split('\t')
     group = int(columns[0])
-    chr_name = columns[5]
+    chr_name = columns[6]
     return chr_name, group
 
 
@@ -691,14 +585,12 @@ def create_output_dir(dir_path):
 
 def split_espresso_s_output_for_c(orig_work_dir, new_base_dir,
                                   target_reads_per_c, num_threads_per_c,
-                                  genome_fasta, sort_memory_buffer_size):
+                                  genome_fasta):
     create_output_dir(new_base_dir)
     chr_groups = get_chr_groups_from_s_output(orig_work_dir)
     fasta_dir = os.path.join(new_base_dir, 'fastas')
     os.makedirs(fasta_dir)
     fasta_index = index_fasta(genome_fasta)
-    sam_dir = os.path.join(new_base_dir, 'sams')
-    os.makedirs(sam_dir)
 
     copied_details = copy_sort_and_index_some_orig_files(
         orig_work_dir, new_base_dir)
@@ -707,18 +599,15 @@ def split_espresso_s_output_for_c(orig_work_dir, new_base_dir,
 
     orig_samples_path = os.path.join(orig_work_dir, 'samples.tsv.updated')
     new_samples_path = os.path.join(new_base_dir, 'samples.tsv.updated')
-    orig_info_by_c_dir = parse_orig_samples(orig_samples_path)
+    sample_by_c_dir = parse_orig_samples(orig_samples_path)
     temp_bam_to_sam_dir = os.path.join(sorted_copy_dir, 'temp_bam_to_sam')
     os.makedirs(temp_bam_to_sam_dir)
-    read_id_to_sample = get_read_id_to_sample(orig_info_by_c_dir,
-                                              temp_bam_to_sam_dir)
 
     new_c_sub_dirs = split_files_to_new_c_dirs(
-        orig_info_by_c_dir, new_base_dir, new_samples_path, target_reads_per_c,
+        sample_by_c_dir, new_base_dir, new_samples_path, target_reads_per_c,
         num_threads_per_c, chr_groups, fasta_dir, fasta_index, genome_fasta,
-        sam_dir, sorted_copy_dir, indices_by_path, sort_memory_buffer_size,
-        read_id_to_sample)
-    copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, orig_info_by_c_dir)
+        sorted_copy_dir, indices_by_path)
+    copy_sj_list_lines(new_c_sub_dirs, orig_work_dir, sample_by_c_dir)
     shutil.rmtree(sorted_copy_dir)
 
 
@@ -726,8 +615,7 @@ def main():
     args = parse_args()
     split_espresso_s_output_for_c(args.orig_work_dir, args.new_base_dir,
                                   args.target_reads_per_c,
-                                  args.num_threads_per_c, args.genome_fasta,
-                                  args.sort_memory_buffer_size)
+                                  args.num_threads_per_c, args.genome_fasta)
 
 
 if __name__ == '__main__':

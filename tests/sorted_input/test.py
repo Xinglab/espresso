@@ -148,7 +148,7 @@ class SortedInputBaseTest(tests.base_test.BaseTest):
         alignments = self._get_alignments()
         random.shuffle(alignments)
         read_id_offset = 0
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, self._chromosomes, alignments, read_id_offset)
         if self._should_sort_alignments():
             temp_file = '{}.tmp.sam'.format(sam_path)
@@ -172,7 +172,8 @@ class SortedInputBaseTest(tests.base_test.BaseTest):
     def _run_espresso_s(self):
         command = [
             'perl', self._espresso_s, '-L', self._samples_tsv, '-F',
-            self._fasta, '-O', self._work_dir, '-A', self._gtf
+            self._fasta, '-O', self._work_dir, '-A', self._gtf,
+            '--alignment_read_groups'
         ]
 
         self._s_log = os.path.join(self._log_dir, 'espresso_s.log')

@@ -115,7 +115,7 @@ class AlignmentsBaseTest(tests.base_test.BaseTest):
 
         use_m_cigar_op = self._use_m_cigar_op()
         read_id_offset = 0
-        read_id_offset += tests.base_test.write_sam_from_alignments(
+        read_id_offset = tests.base_test.write_sam_from_alignments(
             sam_path, [self._alignment_chrom],
             alignments,
             read_id_offset,

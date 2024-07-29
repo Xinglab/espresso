@@ -13,9 +13,11 @@ ESPRESSO (Error Statistics PRomoted Evaluator of Splice Site Options) is a novel
 
 * [Dependencies](#dependencies)
 * [Usage](#usage)
+  + [Resources](#resources)
   + [Snakemake](#snakemake)
   + [Basic Usage](#basic-usage)
   + [Example](#example)
+  + [Example With Split](#example-with-split)
   + [Preparing Input Files](#preparing-input-files)
   + [All Arguments](#all-arguments)
 * [Output](#output)
@@ -37,6 +39,8 @@ ESPRESSO requires the following to be installed and available on $PATH:
 * [BLAST](https://blast.ncbi.nlm.nih.gov/Blast.cgi) >= 2.8.1
 * [samtools](http://www.htslib.org/) >= 1.6
 
+ESPRESSO also includes a perl module that can be compiled with [./src/Parasail/build](./src/Parasail/build). That module uses [parasail](https://github.com/jeffdaily/parasail). The build script uses [cmake](https://cmake.org/)
+
 ESPRESSO requires a sorted SAM or BAM file as input. If the data is in another format then other tools can be used to create the sorted alignment file:
 
 * [minimap2](https://github.com/lh3/minimap2)
@@ -55,11 +59,21 @@ If using the [Snakemake](#snakemake) then its installation script can install th
 
 ## Usage
 
-Please ensure that enough memory is available for the input data and number of threads. The memory usage (in GB) is estimated to be:
+### Resources
 
-* `ESPRESSO_S`: `num_threads * (4 + read_count_of_largest_input/1,000,000)`
-* `ESPRESSO_C`: `num_threads * (4 + read_count/2,500,000)`
-* `ESPRESSO_Q`: `num_threads * (2 + total_read_count/4,000,000)`
+Please ensure that enough memory is available. A rough estimate of the required memory (in GB):
+
+* `ESPRESSO_S`: `num_threads * 8`
+* `ESPRESSO_C`: `num_threads * 6`
+* `ESPRESSO_Q`: `num_threads * (1 + 8*num_reads_in_group/1,000,000)`
+
+The memory usage depends on the reference sequence and annotation and the estimate is based on GENCODE v46 primary assembly files. The memory usage also depends on the size of read groups defined by ESPRESSO. By default ESPRESSO groups reads based on annotated gene coordinates. With `--alignment_read_groups` ESPRESSO groups reads if they have overlapping alignment coordinates. For large datasets grouping based on overlapping alignments can result in very large groups
+
+The S step can use at most 1 thread per input alignment file. The time needed for a thread to process an alignment file is estimated to be (in minutes): `5 * num_alignments/1,000,000`
+
+The C step can use at most 1 thread per ESPRESSO defined read group. The time needed for a thread to process a read group is estimated to be (in minutes): `3 * num_reads_in_group/10,000`. The time can vary depending on the reads and splice junctions in the read group. With `--blast` the C step takes about 4 times as long and there is more variability in running time. By default there is 1 C step job per input alignment file. For large datasets [snakemake/scripts/split_espresso_s_output_for_c.py](snakemake/scripts/split_espresso_s_output_for_c.py) is recommended to split the reads into many small C step jobs. If running without the snakemake the script can be run manually. See [Example With Split](#example-with-split)
+
+The Q step can use at most 1 thread per chromosome. Within a chromosome a thread works on 1 ESPRESSO defined read group at a time. The time needed for a thread to process a chromosome is estimated to be (in minutes): `8 * num_reads_in_chromosome/1,000,000`
 
 ### Snakemake
 
@@ -120,12 +134,54 @@ perl ESPRESSO_Q.pl -A SIRV_C.gtf -L test_sirv/samples.tsv.updated -V test_sirv/s
 
 The three main output files are in `test_sirv/` and provide details of the three detected isoforms (SIRV201,202,203). See [Output](#output) for a description of the files. The output file `test_sirv/samples_N2_R0_abundance.esp` should be similar to [test_data/expected_sirv_abundance.esp](test_data/expected_sirv_abundance.esp).
 
+A SAM file with corrected alignments can be generated. The script requires libparasail.so which can be created by [./src/Parasail/build](./src/Parasail/build) or [snakemake/install](snakemake/install)
+```
+python3 ./snakemake/scripts/create_corrected_sam.py --samples-tsv samples.tsv --espresso-out-dir test_sirv --out-dir test_sirv_corrected_sam --fasta SIRV2.fasta --libparasail-so-path ./src/libparasail.so
+```
+
 The visualization files can be generated with
 ```
 python3 visualization/visualize.py --genome-fasta SIRV2.fasta --updated-gtf test_sirv/samples_N2_R0_updated.gtf --abundance-esp test_sirv/samples_N2_R0_abundance.esp --target-gene SIRV2 --minimum-count 1 --descriptive-name SIRV --output-dir test_sirv/visualization
 ```
 
 ![SIRV result visualization](test_data/visualization_sirv.png)
+
+### Example With Split
+
+Like [Example](#example) but with [snakemake/scripts/split_espresso_s_output_for_c.py](snakemake/scripts/split_espresso_s_output_for_c.py) to split the reads over multiple C step jobs
+
+Create samples.tsv:
+```
+/path/to/SIRV2_3.sort.sam	test_sample_name
+```
+
+Run `ESPRESSO_S`:
+```
+perl ESPRESSO_S.pl -A SIRV_C.gtf -L samples.tsv -F SIRV2.fasta -O test_split_sirv
+```
+
+Run `snakemake/scripts/split_espresso_s_output_for_c.py`. Larger values for `--target-reads-per-c` and `--num-threads-per-c` would be used in a bigger dataset:
+```
+python snakemake/scripts/split_espresso_s_output_for_c.py --orig-work-dir test_split_sirv --new-base-dir test_split_sirv_c --target-reads-per-c 1000 --num-threads-per-c 1 --genome-fasta SIRV2.fasta
+```
+
+`test_split_sirv_c` has 4 directories for 4 C step jobs. The jobs can be run concurrently. `-X 0` is always used after `split_espresso_s_output_for_c.py`
+```
+perl ESPRESSO_C.pl -I test_split_sirv_c/0 -F test_split_sirv_c/fastas/0.fa -X 0
+perl ESPRESSO_C.pl -I test_split_sirv_c/1 -F test_split_sirv_c/fastas/1.fa -X 0
+perl ESPRESSO_C.pl -I test_split_sirv_c/2 -F test_split_sirv_c/fastas/2.fa -X 0
+perl ESPRESSO_C.pl -I test_split_sirv_c/3 -F test_split_sirv_c/fastas/3.fa -X 0
+```
+
+Run `combine_espresso_c_output_for_q.py` to create the directory structure that the Q step expects:
+```
+python snakemake/scripts/combine_espresso_c_output_for_q.py --c-base-work-dir test_split_sirv_c --new-base-dir test_split_sirv_q
+```
+
+Run `ESPRESSO_Q`:
+```
+perl ESPRESSO_Q.pl -A SIRV_C.gtf -L test_split_sirv_q/samples.tsv.updated -V test_split_sirv_q/samples_N2_R0_compatible_isoform.tsv
+```
 
 ### Preparing Input Files
 
@@ -213,11 +269,14 @@ Arguments:
           chrM)
 
     -T, --num_thread
-          thread number (default: minimum of 5 and sam file number)
+          thread number. At most 1 thread can be used per input alignment file.
+          (default: minimum of 5 and sam file number)
     -Q, --mapq_cutoff
           min mapping quality for processing (default: 1)
     --sort_buffer_size
           memory buffer size for running 'sort' commands (default: 2G)
+    --alignment_read_groups
+          use overlapping alignment coordinates to determine read groups
 ```
 
 ```
@@ -240,6 +299,8 @@ Arguments:
           thread number (default: 5)
     --sort_buffer_size
           memory buffer size for running 'sort' commands (default: 2G)
+    --blast
+          Use BLAST instead of Smith-Waterman
 ```
 
 ```
@@ -259,7 +320,7 @@ Arguments:
     -V, --tsv_compt
           output tsv for compatible isoform(s) of each read (optional)
     -T --num_thread
-          how many threads to use (default: 5)
+          thread number. At most 1 thread can be used per chromosome. (default: 5)
 
     -H, --help
           show this help information
@@ -281,6 +342,8 @@ Arguments:
     --allow_longer_terminal_exons
           allow an alignment to match an isoform even if the alignment endpoint
           extends more than --SJ_dist past the start or end
+    --sort_buffer_size
+          memory buffer size for running 'sort' commands (default: 2G)
 ```
 
 ## Output
