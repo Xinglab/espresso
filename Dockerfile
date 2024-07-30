@@ -5,6 +5,7 @@ RUN apt-get update \
        ca-certificates \
        curl \
        git \
+       make \
     && rm -rf /var/lib/apt/lists/* \
     # Install conda to /conda
     && mkdir /conda \
