@@ -46,7 +46,7 @@ vis_descriptive_name: 'ESPRESSO'
 # snakemake will gunzip the file.
 # **The gtf_name and fasta_name should not end with .gz**
 gtf_name: 'gencode.v46.primary_assembly.annotation.gtf'
-fasta_name: 'GRCh38.primary_assembly.genome.fa.gz'
+fasta_name: 'GRCh38.primary_assembly.genome.fa'
 # The entries under reference_files should be
 # file_name.with.extension:
 #   url: 'url_path/to_the/file_name.with.extension'
