@@ -82,6 +82,9 @@ samples:
   + `use_alignment_read_groups`: Use overlapping alignment coordinates instead of gene coordinates from the GTF to determine read groups
   + `output_compatible_isoforms`: Produce the `samples_N2_R0_compatible_isoform.tsv` output file.
   + `output_corrected_sam_files`: Produce a sam file containing corrected alignments for each input
+  + `correction_junction_cigar_only`: Only output the start, end, and junction coordinates in the corrected sam files
+  + `correction_aggregate_by_sample`: Output a corrected sam file for each sample name
+  + `correction_num_jobs`: The number of jobs to use when creating corrected sam files
   + `enable_visualization`: Generate files for visualization. Requires setting other config values under "Visualization options"
   + `target_reads_per_espresso_c_job`: How many reads should be run in a single `ESPRESSO_C` job
   + `guppy_gpu_name`: Used to request the correct GPU if submitting jobs to a scheduler

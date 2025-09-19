@@ -134,7 +134,7 @@ perl ESPRESSO_Q.pl -A SIRV_C.gtf -L test_sirv/samples.tsv.updated -V test_sirv/s
 
 The three main output files are in `test_sirv/` and provide details of the three detected isoforms (SIRV201,202,203). See [Output](#output) for a description of the files. The output file `test_sirv/samples_N2_R0_abundance.esp` should be similar to [test_data/expected_sirv_abundance.esp](test_data/expected_sirv_abundance.esp).
 
-A SAM file with corrected alignments can be generated. The script requires libparasail.so which can be created by [./src/Parasail/build](./src/Parasail/build) or [snakemake/install](snakemake/install)
+A SAM file with corrected alignments can be generated. The script requires libparasail.so which can be created by [./src/Parasail/build](./src/Parasail/build) or [snakemake/install](snakemake/install). There are also parameters to produce simplified alignments and to perform the correction using multiple jobs.
 ```
 python3 ./snakemake/scripts/create_corrected_sam.py --samples-tsv samples.tsv --espresso-out-dir test_sirv --out-dir test_sirv_corrected_sam --fasta SIRV2.fasta --libparasail-so-path ./src/libparasail.so
 ```
