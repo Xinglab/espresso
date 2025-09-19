@@ -13,6 +13,10 @@ RUN apt-get update \
     && curl -L 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh' -O \
     && bash Miniconda3-latest-Linux-x86_64.sh -b -p /conda/install \
     && /conda/install/bin/conda init \
+    && echo '' > /conda/install/.condarc \
+    && /conda/install/bin/conda config --add channels conda-forge \
+    && /conda/install/bin/conda config --add channels bioconda \
+    && /conda/install/bin/conda config --remove channels defaults \
     # The mamba installer solves the package dependencies for ESPRESSO
     # using much less RAM
     && /conda/install/bin/conda install conda-libmamba-solver \

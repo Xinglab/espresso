@@ -6,9 +6,15 @@ guppy_threads: 20
 guppy_time_hr: 48
 combine_c_for_q_mem_gb: 8
 combine_c_for_q_time_hr: 12
-create_corrected_sams_mem_gb: 16
-create_corrected_sams_threads: 10
-create_corrected_sams_time_hr: 48
+create_corrected_sams_stage_1_mem_gb: 20
+create_corrected_sams_stage_1_threads: 8
+create_corrected_sams_stage_1_time_hr: 24
+create_corrected_sams_stage_2_mem_gb: 12
+create_corrected_sams_stage_2_threads: 5
+create_corrected_sams_stage_2_time_hr: 24
+create_corrected_sams_stage_3_mem_gb: 20
+create_corrected_sams_stage_3_threads: 8
+create_corrected_sams_stage_3_time_hr: 24
 espresso_c_mem_gb: 32
 espresso_c_threads: 4
 espresso_c_time_hr: 12
@@ -30,7 +36,11 @@ keep_espresso_c_temp: false
 use_blast: false
 use_alignment_read_groups: false
 output_compatible_isoforms: false
-output_corrected_sam_files: false
+output_corrected_sam_files: true
+correction_batch_size: 50000
+correction_junction_cigar_only: true
+correction_aggregate_by_sample: true
+correction_num_jobs: 8
 corrected_sam_aligner_window: 400
 target_reads_per_espresso_c_job: 400000
 # Visualization options

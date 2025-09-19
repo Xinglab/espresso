@@ -26,6 +26,48 @@ function build_library() {
   cd "${ORIG_DIR}" || return 1
 }
 
+# perl may have been built against xlocale.h.
+# xlocale.h was removed in glibc 2.26: https://github.com/conda-forge/perl-feedstock/issues/28
+# locale.h can be used instead.
+function ensure_xlocale() {
+  local TMP_FILE="${SCRIPT_DIR}/temp_file_to_check_header.c"
+  local TMP_OUT="${SCRIPT_DIR}/temp_file_to_check_header.out"
+  echo '#include <xlocale.h>' > "${TMP_FILE}" || return 1
+  gcc -H -fsyntax-only "${TMP_FILE}" 2>/dev/null
+  local RETURN_CODE="$?"
+  if [[ "${RETURN_CODE}" -eq 0 ]]; then
+    # xlocale is found
+    rm "${TMP_FILE}" || return 1
+    return 0
+  fi
+
+  echo '#include <locale.h>' > "${TMP_FILE}" || return 1
+  gcc -H -fsyntax-only "${TMP_FILE}" 2> "${TMP_OUT}"
+  local RETURN_CODE="$?"
+  rm "${TMP_FILE}" || return 1
+  if [[ "${RETURN_CODE}" -ne 0 ]]; then
+    # locale not found
+    echo 'neither xlocale.h or locale.h found' >&2
+    rm "${TMP_OUT}" || return 1
+    return 1
+  fi
+
+  local LOCALE_H_PATH=$(cut -d ' ' -f 2 "${TMP_OUT}" | head -n 1)
+  local RETURN_CODE="$?"
+  rm "${TMP_OUT}" || return 1
+  if [[ "${RETURN_CODE}" -ne 0 ]]; then
+    echo 'could not parse locale.h location' >&2
+    return 1
+  fi
+
+  local LINK_PATH="${SCRIPT_DIR}/xlocale.h"
+  if [[ -f "${LINK_PATH}" ]]; then
+    rm "${LINK_PATH}" || return 1
+  fi
+
+  ln -s "${LOCALE_H_PATH}" "${LINK_PATH}" || return 1
+}
+
 function build_module() {
   local ORIG_DIR="$(pwd)" || return 1
   cd "${SCRIPT_DIR}" || return 1
@@ -35,6 +77,7 @@ function build_module() {
   cp "${PARASAIL_BUILD_SO_PATH}" ./ || return 1
   cp "${PARASAIL_HEADER}" ./ || return 1
 
+  ensure_xlocale || return 1
   perl Makefile.PL || return 1
   make || return 1
   cp libparasail.so ./blib/lib/ || return 1

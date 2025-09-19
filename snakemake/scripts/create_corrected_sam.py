@@ -37,7 +37,7 @@ def parse_args():
                               ' Specified as {num_gb}G (default %(default)s)'))
     parser.add_argument('--alignment-batch-size',
                         type=int,
-                        default=1000,
+                        default=50000,
                         help=('how many alignments to process at a time'
                               ' (default %(default)s)'))
     parser.add_argument(
@@ -61,8 +61,38 @@ def parse_args():
         help=('A limit on the sequence length given to the aligner.'
               ' A smaller window can result in shorter running time,'
               ' but worse cigar strings'))
+    parser.add_argument(
+        '--junction-cigar-only',
+        action='store_true',
+        help=('For each read output a CIGAR string based only on the'
+              ' junction coordinates and read start and end. Insertions,'
+              ' deletions, mismatches, and the read sequence are not included'
+              ' in the output'))
+    parser.add_argument(
+        '--aggregate-output-by-sample',
+        action='store_true',
+        help=('Output corrected reads to a file based on the sample name'
+              ' provided to ESPRESSO. With --junction-cigar-only using the'
+              ' sample name eliminates the need to read the original alignment'
+              ' files'))
+    parser.add_argument('--num-jobs',
+                        type=int,
+                        default=1,
+                        help='How many jobs to use for stage 2')
+    parser.add_argument('--job-i',
+                        type=int,
+                        default=0,
+                        help='Which job_i when running stage 2')
+    parser.add_argument('--stage',
+                        default='all',
+                        choices=['1', '2', '3', 'all'],
+                        help='Which stage to run')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.stage == 'all' and args.num_jobs != 1:
+        parser.error('Can only run "--stage all" with "--num-jobs 1"')
+
+    return args
 
 
 def create_c_string(string):
@@ -152,6 +182,7 @@ def process_read_final_line(read_details, line, in_path):
         read_details['group'] = int(columns[2])
         # ${n}_$read_ID_update
         read_details['group_updated'] = columns[3]
+        read_details['sample'] = columns[4]
     elif feature == 'strand_isoform':
         read_details['strand_isoform'] = parse_strand(columns[2])
     elif feature == 'strand_read':
@@ -234,26 +265,41 @@ def process_read_final_sj_feature(read_details, columns):
 def get_contig_order_from_fasta(fasta_path):
     print_with_timestamp('Reading {}'.format(fasta_path))
     contig_order = list()
+    contig_lengths = dict()
+    length = 0
+    current_contig = None
     with open(fasta_path, 'rt') as handle:
         for line in handle:
             line = line.rstrip('\n')
-            if (not contig_order) or line.startswith('>'):
+            if (current_contig is None) or line.startswith('>'):
                 found_contig = parse_fasta_contig_line(line)
                 contig_order.append(found_contig)
+                if current_contig is not None:
+                    contig_lengths[current_contig] = length
 
-    return contig_order
+                length = 0
+                current_contig = found_contig
+                continue
+
+            length += len(line)
+
+    if current_contig is not None:
+        contig_lengths[current_contig] = length
+
+    return {'order': contig_order, 'lengths': contig_lengths}
 
 
 def parse_samples_tsv(samples_tsv_path):
-    orig_sam_or_bam_paths = list()
+    paths_to_sample = dict()
     with open(samples_tsv_path, 'rt') as handle:
         for line in handle:
             columns = line.rstrip('\n').split('\t')
             sam_or_bam_path = columns[0]
+            sample_name = columns[1]
             abs_path = os.path.abspath(sam_or_bam_path)
-            orig_sam_or_bam_paths.append(abs_path)
+            paths_to_sample[abs_path] = sample_name
 
-    return orig_sam_or_bam_paths
+    return paths_to_sample
 
 
 def index_sam_path(sam_path, index_path):
@@ -452,9 +498,24 @@ def run_index_sam_or_bam_paths_threads(thread_arguments, num_threads,
 
     for thread in threads:
         thread.join()
+        if thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                thread.exitcode))
 
     thread_inputs.close()
     thread_outputs.close()
+
+
+def create_sample_out_file_mapping(sample_names, out_dir):
+    sample_out_file_mapping = dict()
+    out_sam_rename_path = os.path.join(out_dir, 'sam_file_name_mapping.txt')
+    with open(out_sam_rename_path, 'wt') as handle:
+        for i, name in enumerate(sample_names):
+            basename = '{}.sam'.format(i)
+            sample_out_file_mapping[name] = basename
+            write_tsv_line(handle, [name, basename])
+
+    return sample_out_file_mapping
 
 
 def index_sam_or_bam_paths(orig_paths, out_dir, num_threads):
@@ -509,7 +570,27 @@ def find_read_final_paths(espresso_dir):
     return read_final_paths
 
 
-def write_read_final_entries_for_sorting(in_path, in_handle, out_handle):
+def write_read_final_entry_for_sorting(read_details, out_handle):
+    if not read_details:
+        return
+
+    json_string = json.dumps(read_details)
+    start_details = read_details['start']
+    start_pos = start_details['pos']
+    out_handle.write('{}\t{}\n'.format(start_pos, json_string))
+
+
+def parse_sorted_read_final_line(line):
+    first_tab_i = line.find('\t')
+    if first_tab_i == -1:
+        raise Exception('Expected to find a tab in {}'.format(line))
+
+    read_final_json = line[(first_tab_i + 1):]
+    read_final = json.loads(read_final_json)
+    return read_final
+
+
+def parse_read_final_path_with_handles(in_path, in_handle, out_handle):
     next_line = None
     parsed_details = parse_read_final_read_id(in_path, in_handle, next_line)
     details = parsed_details['read_details']
@@ -523,21 +604,168 @@ def write_read_final_entries_for_sorting(in_path, in_handle, out_handle):
         write_read_final_entry_for_sorting(details, out_handle)
 
 
-def write_read_final_entry_for_sorting(read_details, out_handle):
-    if not read_details:
-        return
+def parse_read_final_path(contig, orig_paths, out_dir, path_suffix):
+    unsorted_paths = list()
+    for orig_i, orig_path in enumerate(orig_paths):
+        out_path = os.path.join(
+            out_dir, '{}_{}_unsorted{}'.format(contig, orig_i, path_suffix))
+        with open(orig_path, 'rt') as in_handle:
+            with open(out_path, 'wt') as out_handle:
+                parse_read_final_path_with_handles(orig_path, in_handle,
+                                                   out_handle)
 
-    json_string = json.dumps(read_details)
-    start_details = read_details['start']
-    start_pos = start_details['pos']
-    out_handle.write('{}\t{}\n'.format(start_pos, json_string))
+        unsorted_paths.append(out_path)
+
+    return {'contig': contig, 'unsorted_paths': unsorted_paths}
+
+
+def parse_read_final_path_thread(in_queue, out_queue):
+    while True:
+        arguments = try_get_from_queue_with_short_wait(in_queue)
+        if arguments is None:
+            return
+
+        result = parse_read_final_path(arguments['contig'],
+                                       arguments['orig_paths'],
+                                       arguments['out_dir'],
+                                       arguments['path_suffix'])
+        out_queue.put(result)
+
+
+def parse_read_final_paths_threads(orig_paths_by_contig, out_dir, path_suffix,
+                                   num_threads):
+    unsorted_paths_by_contig = dict()
+    thread_arguments = list()
+    for contig, orig_paths in orig_paths_by_contig.items():
+        thread_arguments.append({
+            'contig': contig,
+            'orig_paths': orig_paths,
+            'out_dir': out_dir,
+            'path_suffix': path_suffix
+        })
+
+    num_jobs = len(thread_arguments)
+    threads = list()
+    thread_outputs = multiprocessing.Queue(num_jobs)
+    thread_inputs = multiprocessing.Queue(num_jobs)
+    for arguments in thread_arguments:
+        thread_inputs.put(arguments)
+
+    for _ in range(num_threads):
+        thread = multiprocessing.Process(target=parse_read_final_path_thread,
+                                         args=(thread_inputs, thread_outputs))
+        threads.append(thread)
+        thread.start()
+
+    for _ in range(num_jobs):
+        thread_result = thread_outputs.get()
+        contig = thread_result['contig']
+        unsorted_paths = thread_result['unsorted_paths']
+        unsorted_paths_by_contig[contig] = unsorted_paths
+
+    for thread in threads:
+        thread.join()
+        if thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                thread.exitcode))
+
+    thread_inputs.close()
+    thread_outputs.close()
+
+    return unsorted_paths_by_contig
+
+
+def sort_read_final_path(contig, unsorted_paths, out_dir, path_suffix,
+                         sort_memory_buffer_size):
+    sort_temp_dir = out_dir
+    sorted_path = os.path.join(out_dir,
+                               '{}_sorted{}'.format(contig, path_suffix))
+    files_to_sort_path = os.path.join(out_dir,
+                                      '{}_files_to_sort'.format(contig))
+    with open(files_to_sort_path, 'wt') as files_out_handle:
+        null_joined = '\0'.join(unsorted_paths)
+        files_out_handle.write(null_joined)
+
+    # sort numerically by the first column (start coordinate)
+    sort_key = '1'
+    sort_command = [
+        'sort', '--numeric', '--key', sort_key, '--output', sorted_path,
+        '--buffer-size', sort_memory_buffer_size, '--temporary-directory',
+        sort_temp_dir, '--files0-from', files_to_sort_path
+    ]
+    os.environ['LC_ALL'] = 'C'  # ensure standard sorting behavior
+    subprocess.run(sort_command, check=True)
+
+    os.remove(files_to_sort_path)
+    for unsorted_path in unsorted_paths:
+        os.remove(unsorted_path)
+
+    return {'contig': contig, 'sorted_path': sorted_path}
+
+
+def sort_read_final_path_thread(in_queue, out_queue):
+    while True:
+        arguments = try_get_from_queue_with_short_wait(in_queue)
+        if arguments is None:
+            return
+
+        result = sort_read_final_path(arguments['contig'],
+                                      arguments['unsorted_paths'],
+                                      arguments['out_dir'],
+                                      arguments['path_suffix'],
+                                      arguments['sort_memory_buffer_size'])
+        out_queue.put(result)
+
+
+def sort_read_final_paths_threads(unsorted_paths_by_contig,
+                                  read_finals_out_dir, path_suffix,
+                                  sort_memory_buffer_size, num_threads):
+    sorted_paths = dict()
+    thread_arguments = list()
+    for contig, unsorted_paths in unsorted_paths_by_contig.items():
+        thread_arguments.append({
+            'contig': contig,
+            'unsorted_paths': unsorted_paths,
+            'out_dir': read_finals_out_dir,
+            'path_suffix': path_suffix,
+            'sort_memory_buffer_size': sort_memory_buffer_size
+        })
+
+    num_jobs = len(thread_arguments)
+    threads = list()
+    thread_outputs = multiprocessing.Queue(num_jobs)
+    thread_inputs = multiprocessing.Queue(num_jobs)
+    for arguments in thread_arguments:
+        thread_inputs.put(arguments)
+
+    for _ in range(num_threads):
+        thread = multiprocessing.Process(target=sort_read_final_path_thread,
+                                         args=(thread_inputs, thread_outputs))
+        threads.append(thread)
+        thread.start()
+
+    for _ in range(num_jobs):
+        thread_result = thread_outputs.get()
+        contig = thread_result['contig']
+        sorted_path = thread_result['sorted_path']
+        sorted_paths[contig] = sorted_path
+
+    for thread in threads:
+        thread.join()
+        if thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                thread.exitcode))
+
+    thread_inputs.close()
+    thread_outputs.close()
+
+    return sorted_paths
 
 
 def parse_and_sort_read_final_paths(read_final_paths, out_dir,
-                                    sort_memory_buffer_size):
-    print_with_timestamp('Parsing read final files')
+                                    sort_memory_buffer_size, num_threads):
     read_finals_out_dir = os.path.join(out_dir, 'read_finals')
-    unsorted_paths = dict()
+    orig_paths_by_contig = dict()
     path_suffix = '_read_final.txt'
     for orig_path in read_final_paths:
         orig_basename = os.path.basename(orig_path)
@@ -546,37 +774,23 @@ def parse_and_sort_read_final_paths(read_final_paths, out_dir,
                 orig_path, path_suffix))
 
         contig = orig_basename[:-len(path_suffix)]
-        unsorted_path = unsorted_paths.get(contig)
-        if not unsorted_path:
-            unsorted_path = os.path.join(
-                read_finals_out_dir,
-                '{}_unsorted{}'.format(contig, path_suffix))
-            unsorted_paths[contig] = unsorted_path
-            with open(unsorted_path, 'wt'):
-                pass  # truncate file
+        orig_paths = orig_paths_by_contig.get(contig)
+        if not orig_paths:
+            orig_paths = list()
+            orig_paths_by_contig[contig] = orig_paths
 
-        with open(orig_path, 'rt') as in_handle:
-            with open(unsorted_path, 'at') as out_handle:
-                write_read_final_entries_for_sorting(orig_path, in_handle,
-                                                     out_handle)
+        orig_paths.append(orig_path)
+
+    print_with_timestamp('Parsing read final files')
+    unsorted_paths_by_contig = parse_read_final_paths_threads(
+        orig_paths_by_contig, read_finals_out_dir, path_suffix, num_threads)
 
     print_with_timestamp('Sorting read final files')
-    sorted_paths = dict()
-    sort_temp_dir = read_finals_out_dir
-    for contig, unsorted_path in unsorted_paths.items():
-        sorted_path = os.path.join(read_finals_out_dir,
-                                   '{}_sorted{}'.format(contig, path_suffix))
-        sorted_paths[contig] = sorted_path
-        # sort numerically by the first column (start coordinate)
-        sort_key = '1'
-        sort_command = [
-            'sort', '--numeric', '--key', sort_key, '--output', sorted_path,
-            '--buffer-size', sort_memory_buffer_size, '--temporary-directory',
-            sort_temp_dir, unsorted_path
-        ]
-        os.environ['LC_ALL'] = 'C'  # ensure standard sorting behavior
-        subprocess.run(sort_command, check=True)
-        os.remove(unsorted_path)
+    sorted_paths = sort_read_final_paths_threads(unsorted_paths_by_contig,
+                                                 read_finals_out_dir,
+                                                 path_suffix,
+                                                 sort_memory_buffer_size,
+                                                 num_threads)
 
     return sorted_paths
 
@@ -654,13 +868,42 @@ def reorder_headers(orig_path, new_path, contig_order):
             out_handle.write(line)
 
 
-def create_output_sams(indexed_orig_sam_paths, contig_order, out_dir):
+def write_tsv_line(handle, columns):
+    handle.write('{}\n'.format('\t'.join([str(x) for x in columns])))
+
+
+def create_output_sams_by_sample(sample_out_file_mapping, out_dir,
+                                 output_sam_paths, full_contig_order,
+                                 contig_lengths):
+    for basename in sample_out_file_mapping.values():
+        out_path = os.path.join(out_dir, basename)
+        output_sam_paths[basename] = out_path
+        with open(out_path, 'wt') as handle:
+            write_tsv_line(handle, ['@HD', 'VN:1.6', 'SO:coordinate'])
+            for contig in full_contig_order:
+                length = contig_lengths[contig]
+                sn_part = 'SN:{}'.format(contig)
+                ln_part = 'LN:{}'.format(length)
+                write_tsv_line(handle, ['@SQ', sn_part, ln_part])
+
+
+def create_output_sams(job_i, indexed_orig_sam_paths, full_contig_order,
+                       out_dir, aggregate_output_by_sample,
+                       sample_out_file_mapping, contig_lengths):
     print_with_timestamp('Writing headers for output sams')
+    job_out_dir = os.path.join(out_dir, str(job_i))
+    os.mkdir(job_out_dir)
     output_sam_paths = dict()
+    if aggregate_output_by_sample:
+        create_output_sams_by_sample(sample_out_file_mapping, job_out_dir,
+                                     output_sam_paths, full_contig_order,
+                                     contig_lengths)
+        return output_sam_paths
+
     for new_basename, details in indexed_orig_sam_paths.items():
         sam_path = details['sam_path']
-        out_path = os.path.join(out_dir, new_basename)
-        reorder_headers(sam_path, out_path, contig_order)
+        out_path = os.path.join(job_out_dir, new_basename)
+        reorder_headers(sam_path, out_path, full_contig_order)
         output_sam_paths[new_basename] = out_path
 
     return output_sam_paths
@@ -708,16 +951,6 @@ def parse_fasta_contig_line(line):
     return found_contig
 
 
-def parse_sorted_read_final_line(line):
-    first_tab_i = line.find('\t')
-    if first_tab_i == -1:
-        raise Exception('Expected to find a tab in {}'.format(line))
-
-    read_final_json = line[(first_tab_i + 1):]
-    read_final = json.loads(read_final_json)
-    return read_final
-
-
 def find_alignment_in_sam(sam_details, read_id, orig_start_pos, contig,
                           alignment_batch_size):
     if sam_details['current_contig'] != contig:
@@ -738,7 +971,7 @@ def find_alignment_in_sam(sam_details, read_id, orig_start_pos, contig,
             next_start_pos_i = sam_details['next_start_pos_i']
             for start_pos_i in range(next_start_pos_i, len(loaded_alignments)):
                 start_pos_alignments = loaded_alignments[start_pos_i]
-                found_pos = start_pos_alignments[0]['pos']
+                found_pos = start_pos_alignments['pos']
                 if found_pos > orig_start_pos:
                     return None
 
@@ -746,9 +979,9 @@ def find_alignment_in_sam(sam_details, read_id, orig_start_pos, contig,
                 if found_pos < orig_start_pos:
                     continue
 
-                for alignment in start_pos_alignments:
-                    if alignment['read_id'] == read_id:
-                        return alignment
+                alignment = start_pos_alignments['by_id'].get(read_id)
+                if alignment:
+                    return alignment
 
             if found_pos == orig_start_pos:
                 return None
@@ -803,9 +1036,10 @@ def load_alignments(sam_details, alignment_batch_size):
                     break
 
                 current_start_pos = alignment['pos']
-                alignments.append(list())
+                alignments.append({'pos': current_start_pos, 'by_id': dict()})
 
-            alignments[-1].append(alignment)
+            read_id = alignment['read_id']
+            alignments[-1]['by_id'][read_id] = alignment
             total_loaded += 1
 
         sam_details['current_offset'] = previous_offset
@@ -1090,10 +1324,64 @@ def check_if_interval_coords_increase(intervals):
     return True
 
 
+def get_interval_junction_cigars(corrected_ref_intervals,
+                                 corrected_read_intervals, read_final,
+                                 prev_clipped_start_len, prev_clipped_end_len):
+    previous_ref_end = None
+    junction_lengths = list()
+    total_aligned_read_len = 0
+    ref_seq_lens = list()
+    for interval_i, ref_interval in enumerate(corrected_ref_intervals):
+        ref_start, ref_end = ref_interval
+        read_interval = corrected_read_intervals[interval_i]
+        read_start, read_end = read_interval
+        ref_seq_len = (ref_end + 1) - ref_start
+        read_seq_len = (read_end + 1) - read_start
+        total_aligned_read_len += read_seq_len
+        ref_seq_lens.append(ref_seq_len)
+        if previous_ref_end:
+            junction_lengths.append((ref_start - previous_ref_end) - 1)
+
+        previous_ref_end = ref_end
+
+    adjusted_mapped_length = read_final['mapped_length']
+    adjusted_mapped_length += prev_clipped_start_len
+    adjusted_mapped_length += prev_clipped_end_len
+    if adjusted_mapped_length != total_aligned_read_len:
+        raise Exception(
+            'Length of sequence is inconsistent: {}, {}, {}'.format(
+                adjusted_mapped_length, total_aligned_read_len,
+                read_final['read_id']))
+
+    interval_cigars = list()
+    start_clipping = corrected_read_intervals[0][0]
+    if start_clipping:
+        interval_cigars.append([['S', start_clipping]])
+
+    for ref_seq_i, ref_seq_len in enumerate(ref_seq_lens):
+        if ref_seq_i > 0:
+            junction_length = junction_lengths[ref_seq_i - 1]
+            interval_cigars.append([['N', junction_length]])
+
+        interval_cigar = [['M', ref_seq_len]]
+        interval_cigars.append(interval_cigar)
+
+    end_clipping = read_final['end']['corrected_read_length_after']
+    if end_clipping is None:
+        end_clipping = read_final['end']['read_length_after']
+
+    if end_clipping and (end_clipping > prev_clipped_end_len):
+        end_clipping -= prev_clipped_end_len
+        interval_cigars.append([['S', end_clipping]])
+
+    return interval_cigars
+
+
 def get_interval_cigars(corrected_ref_intervals, corrected_read_intervals,
                         contig_sequence, plus_strand_read_seq, read_final,
                         prev_clipped_start_len, prev_clipped_end_len,
-                        parasail_api, aligner_window_size):
+                        parasail_api, aligner_window_size,
+                        junction_cigar_only):
     # TODO:
     # ESPRESSO could correct an internal junction and end up
     # with the corrected junction coordinate being before/after
@@ -1105,6 +1393,12 @@ def get_interval_cigars(corrected_ref_intervals, corrected_read_intervals,
         corrected_read_intervals)
     if not (ref_coords_increase and read_coords_increase):
         return None
+
+    if junction_cigar_only:
+        return get_interval_junction_cigars(corrected_ref_intervals,
+                                            corrected_read_intervals,
+                                            read_final, prev_clipped_start_len,
+                                            prev_clipped_end_len)
 
     previous_ref_end = None
     junction_lengths = list()
@@ -1152,8 +1446,8 @@ def get_interval_cigars(corrected_ref_intervals, corrected_read_intervals,
                                      aligner_window_size)
         interval_cigars.append(interval_cigar)
 
-    end_clipping = ((len(plus_strand_read_seq) - 1) -
-                    corrected_read_intervals[-1][-1])
+    end_clipping = ((len(plus_strand_read_seq) - 1)
+                    - corrected_read_intervals[-1][-1])
     if end_clipping:
         interval_cigars.append([['S', end_clipping]])
 
@@ -1161,13 +1455,15 @@ def get_interval_cigars(corrected_ref_intervals, corrected_read_intervals,
 
 
 def correct_alignment(read_final, orig_alignment, contig_name, contig_cache,
-                      parasail_api, aligner_window_size):
+                      parasail_api, aligner_window_size, junction_cigar_only,
+                      aggregate_output_by_sample, sample_out_file_mapping):
     contig_sequence = get_contig_seq_from_cache(contig_name, contig_cache)
-
     alignment_is_minus_strand = read_final['strand_isoform'] == '-'
-    # The sequence from the SAM file is always for the forward strand
-    # since the read was mapped.
-    plus_strand_read_seq = orig_alignment['sequence']
+    plus_strand_read_seq = None
+    if orig_alignment:
+        # The sequence from the SAM file is always for the forward strand
+        # since the read was mapped.
+        plus_strand_read_seq = orig_alignment['sequence']
 
     corrected_interval_details = get_corrected_intervals(read_final)
     corrected_ref_intervals = corrected_interval_details['ref_intervals']
@@ -1182,7 +1478,8 @@ def correct_alignment(read_final, orig_alignment, contig_name, contig_cache,
     interval_cigars = get_interval_cigars(
         corrected_ref_intervals, corrected_read_intervals, contig_sequence,
         plus_strand_read_seq, read_final, prev_clipped_start_len,
-        prev_clipped_end_len, parasail_api, aligner_window_size)
+        prev_clipped_end_len, parasail_api, aligner_window_size,
+        junction_cigar_only)
     if interval_cigars is None:
         final_cigar = '*'
     else:
@@ -1201,16 +1498,27 @@ def correct_alignment(read_final, orig_alignment, contig_name, contig_cache,
     corrected['contig_next'] = '*'
     corrected['pos_next'] = 0
     corrected['template_len'] = 0
-    corrected['sequence'] = orig_alignment['sequence']
-    corrected['quality'] = orig_alignment['quality']
+    if junction_cigar_only:
+        corrected['sequence'] = '*'
+        corrected['quality'] = '*'
+    else:
+        corrected['sequence'] = orig_alignment['sequence']
+        corrected['quality'] = orig_alignment['quality']
 
-    corrected['new_basename'] = orig_alignment['new_basename']
+    if aggregate_output_by_sample:
+        sample = read_final['sample']
+        basename = sample_out_file_mapping[sample]
+        corrected['new_basename'] = basename
+    else:
+        corrected['new_basename'] = orig_alignment['new_basename']
 
     return corrected
 
 
 def flush_buffered_alignment_writes(buffered_writes_by_file_path):
-    for sam_path, buffered_writes in buffered_writes_by_file_path.items():
+    sam_paths = list(buffered_writes_by_file_path.keys())
+    for sam_path in sam_paths:
+        buffered_writes = buffered_writes_by_file_path[sam_path]
         with open(sam_path, 'at') as handle:
             for line in buffered_writes:
                 handle.write(line)
@@ -1262,11 +1570,15 @@ def sort_output_sams_thread(in_queue):
         shutil.move(temp_path, sam_path)
 
 
-def sort_output_sams(output_sam_paths, num_threads):
-    num_jobs = len(output_sam_paths)
+def sort_output_sams(sams_by_basename, num_threads):
+    all_paths = list()
+    for sams in sams_by_basename.values():
+        all_paths.extend(sams)
+
+    num_jobs = len(all_paths)
     threads = list()
     thread_inputs = multiprocessing.Queue(num_jobs)
-    for sam_path in output_sam_paths.values():
+    for sam_path in all_paths:
         thread_inputs.put(sam_path)
 
     for _ in range(num_threads):
@@ -1277,12 +1589,14 @@ def sort_output_sams(output_sam_paths, num_threads):
 
     for thread in threads:
         thread.join()
+        if thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                thread.exitcode))
 
     thread_inputs.close()
 
 
 def sort_sam(in_path, out_path):
-
     command = [
         'samtools', 'sort', '-o', out_path, '--output-fmt', 'SAM', in_path
     ]
@@ -1295,6 +1609,50 @@ def sort_sam_by_read_name(in_path, out_path):
         in_path
     ]
     subprocess.run(command, check=True)
+
+
+def merge_sams(out_path, in_paths):
+    print_with_timestamp('Merging sam files to {}'.format(out_path))
+    first_path = in_paths[0]
+    command = ['samtools', 'merge', '-h', first_path, '-o', out_path]
+    command.extend(in_paths)
+    subprocess.run(command, check=True)
+
+
+def merge_output_sams_thread(in_queue):
+    while True:
+        arguments = try_get_from_queue_with_short_wait(in_queue)
+        if arguments is None:
+            return
+
+        merge_sams(arguments['out_path'], arguments['in_paths'])
+
+
+def merge_output_sams(out_dir, sams_by_basename, num_threads):
+    thread_arguments = list()
+    for basename, paths in sams_by_basename.items():
+        out_path = os.path.join(out_dir, basename)
+        thread_arguments.append({'out_path': out_path, 'in_paths': paths})
+
+    num_jobs = len(thread_arguments)
+    threads = list()
+    thread_inputs = multiprocessing.Queue(num_jobs)
+    for arguments in thread_arguments:
+        thread_inputs.put(arguments)
+
+    for _ in range(num_threads):
+        thread = multiprocessing.Process(target=merge_output_sams_thread,
+                                         args=(thread_inputs, ))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+        if thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                thread.exitcode))
+
+    thread_inputs.close()
 
 
 def create_out_directories(out_dir):
@@ -1311,9 +1669,19 @@ def create_out_directories(out_dir):
 
 def cleanup_temp_files(out_dir):
     print_with_timestamp('Cleaning up temporary files')
-    for dir_name in ['orig_sams', 'indices', 'read_finals']:
-        path = os.path.join(out_dir, dir_name)
-        if not os.path.exists(path):
+    stage_1_file = stage_1_out_path(out_dir)
+    if os.path.exists(stage_1_file):
+        print_with_timestamp('rm {}'.format(stage_1_file))
+        os.remove(stage_1_file)
+
+    expected_dirs = ['orig_sams', 'indices', 'read_finals']
+    file_names = os.listdir(out_dir)
+    for file_name in file_names:
+        if not (file_name.isdigit() or file_name in expected_dirs):
+            continue
+
+        path = os.path.join(out_dir, file_name)
+        if not os.path.isdir(path):
             continue
 
         print_with_timestamp('rm -r {}'.format(path))
@@ -1322,7 +1690,10 @@ def cleanup_temp_files(out_dir):
 
 def correct_alignments_from_main_thread(result_to_queue, existing_arguments,
                                         inputs, outputs, contig_cache,
-                                        parasail_api, aligner_window_size):
+                                        parasail_api, aligner_window_size,
+                                        junction_cigar_only,
+                                        aggregate_output_by_sample,
+                                        sample_out_file_mapping):
     if result_to_queue is not None:
         if not try_put_to_queue_with_short_wait(outputs, result_to_queue):
             return result_to_queue, existing_arguments
@@ -1338,11 +1709,11 @@ def correct_alignments_from_main_thread(result_to_queue, existing_arguments,
             if arguments is None:
                 return result_to_queue, existing_arguments
 
-        corrected_alignment = correct_alignment(arguments['read_final'],
-                                                arguments['orig_alignment'],
-                                                arguments['contig_name'],
-                                                contig_cache, parasail_api,
-                                                aligner_window_size)
+        corrected_alignment = correct_alignment(
+            arguments['read_final'], arguments['orig_alignment'],
+            arguments['contig_name'], contig_cache, parasail_api,
+            aligner_window_size, junction_cigar_only,
+            aggregate_output_by_sample, sample_out_file_mapping)
         if not try_put_to_queue_with_short_wait(outputs, corrected_alignment):
             return corrected_alignment, existing_arguments
 
@@ -1352,7 +1723,9 @@ def create_contig_cache(contig_queue):
 
 
 def correct_alignment_thread(inputs, outputs, signals, contig_queue,
-                             parasail_api, aligner_window_size):
+                             parasail_api, aligner_window_size,
+                             junction_cigar_only, aggregate_output_by_sample,
+                             sample_out_file_mapping):
     contig_cache = create_contig_cache(contig_queue)
     while True:
         signal = try_get_from_queue_without_wait(signals)
@@ -1363,11 +1736,11 @@ def correct_alignment_thread(inputs, outputs, signals, contig_queue,
         if arguments is None:
             continue
 
-        corrected_alignment = correct_alignment(arguments['read_final'],
-                                                arguments['orig_alignment'],
-                                                arguments['contig_name'],
-                                                contig_cache, parasail_api,
-                                                aligner_window_size)
+        corrected_alignment = correct_alignment(
+            arguments['read_final'], arguments['orig_alignment'],
+            arguments['contig_name'], contig_cache, parasail_api,
+            aligner_window_size, junction_cigar_only,
+            aggregate_output_by_sample, sample_out_file_mapping)
         outputs.put(corrected_alignment)
 
 
@@ -1378,7 +1751,6 @@ def write_alignments_from_main_thread(result_to_queue, inputs, progress,
     while True:
         if result_to_queue is not None:
             corrected_alignment = result_to_queue
-            result_to_queue = None
         else:
             corrected_alignment = try_get_from_queue_with_short_wait(inputs)
             if corrected_alignment is None:
@@ -1392,7 +1764,6 @@ def write_alignments_from_main_thread(result_to_queue, inputs, progress,
                 progress.value))
 
     flush_buffered_alignment_writes(buffered_writes_by_file_path)
-    return result_to_queue
 
 
 def write_alignment_thread(inputs, progress, signals, output_sam_paths,
@@ -1421,7 +1792,8 @@ def process_corrections_from_main_thread(
         has_writer_thread, writer_thread, aligner_threads, aligner_inputs,
         aligner_outputs, output_sam_paths, buffered_writes_by_file_path,
         alignment_batch_size, progress_every_n, contig_cache, parasail_api,
-        aligner_window_size):
+        aligner_window_size, junction_cigar_only, aggregate_output_by_sample,
+        sample_out_file_mapping):
     # In order to avoid a deadlock, the main thread may need to
     # hold onto a corrected alignment while it waits for the writer thread
     # (or works as the writer thread itself)
@@ -1430,20 +1802,22 @@ def process_corrections_from_main_thread(
            or (result_to_queue is not None)
            or (correct_arguments is not None)):
         if not has_writer_thread:
-            result_to_queue = write_alignments_from_main_thread(
-                result_to_queue, aligner_outputs, writer_progress,
-                output_sam_paths, buffered_writes_by_file_path,
-                alignment_batch_size, progress_every_n)
+            write_alignments_from_main_thread(result_to_queue, aligner_outputs,
+                                              writer_progress,
+                                              output_sam_paths,
+                                              buffered_writes_by_file_path,
+                                              alignment_batch_size,
+                                              progress_every_n)
+            result_to_queue = None
         else:
             raise_exception_if_thread_error(writer_thread)
 
         result_to_queue, correct_arguments = (
-            correct_alignments_from_main_thread(result_to_queue,
-                                                correct_arguments,
-                                                aligner_inputs,
-                                                aligner_outputs, contig_cache,
-                                                parasail_api,
-                                                aligner_window_size))
+            correct_alignments_from_main_thread(
+                result_to_queue, correct_arguments, aligner_inputs,
+                aligner_outputs, contig_cache, parasail_api,
+                aligner_window_size, junction_cigar_only,
+                aggregate_output_by_sample, sample_out_file_mapping))
         for thread in aligner_threads:
             raise_exception_if_thread_error(thread)
 
@@ -1477,14 +1851,17 @@ def create_contig_queues(num_queues, contig_order):
 
 def start_aligner_threads(num_aligner_threads, aligner_inputs, aligner_outputs,
                           aligner_signals, contig_queues, parasail_api,
-                          aligner_window_size):
+                          aligner_window_size, junction_cigar_only,
+                          aggregate_output_by_sample, sample_out_file_mapping):
     aligner_threads = list()
     for thread_i in range(num_aligner_threads):
         contig_queue = contig_queues[thread_i]
         aligner_thread = multiprocessing.Process(
             target=correct_alignment_thread,
             args=(aligner_inputs, aligner_outputs, aligner_signals,
-                  contig_queue, parasail_api, aligner_window_size))
+                  contig_queue, parasail_api, aligner_window_size,
+                  junction_cigar_only, aggregate_output_by_sample,
+                  sample_out_file_mapping))
         aligner_threads.append(aligner_thread)
         aligner_thread.start()
 
@@ -1528,15 +1905,23 @@ def correct_alignments_cleanup(aligner_threads, aligner_inputs,
 
     for aligner_thread in aligner_threads:
         aligner_thread.join()
+        if aligner_thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                aligner_thread.exitcode))
 
     if has_writer_thread:
         writer_thread.join()
+        if writer_thread.exitcode != 0:
+            raise Exception('thread exited with value: {}'.format(
+                writer_thread.exitcode))
 
 
-def correct_alignments(fasta_path, contig_order, sorted_read_final_paths,
-                       indexed_orig_sam_paths, output_sam_paths,
-                       alignment_batch_size, parasail_api, aligner_window_size,
-                       progress_every_n, num_threads):
+def correct_alignments(fasta_path, full_contig_order, contig_order,
+                       sorted_read_final_paths, indexed_orig_sam_paths,
+                       output_sam_paths, alignment_batch_size, parasail_api,
+                       aligner_window_size, progress_every_n, num_threads,
+                       junction_cigar_only, aggregate_output_by_sample,
+                       sample_out_file_mapping):
     num_aligner_threads, has_writer_thread = decide_threads_per_task(
         num_threads)
 
@@ -1547,10 +1932,10 @@ def correct_alignments(fasta_path, contig_order, sorted_read_final_paths,
     writer_progress = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
     writer_signal = multiprocessing.Queue(1)
     buffered_writes_by_file_path = dict()
-    aligner_threads = start_aligner_threads(num_aligner_threads,
-                                            aligner_inputs, aligner_outputs,
-                                            aligner_signals, contig_queues,
-                                            parasail_api, aligner_window_size)
+    aligner_threads = start_aligner_threads(
+        num_aligner_threads, aligner_inputs, aligner_outputs, aligner_signals,
+        contig_queues, parasail_api, aligner_window_size, junction_cigar_only,
+        aggregate_output_by_sample, sample_out_file_mapping)
     writer_thread = maybe_start_writer_thread(has_writer_thread,
                                               aligner_outputs, writer_progress,
                                               writer_signal, output_sam_paths,
@@ -1559,11 +1944,13 @@ def correct_alignments(fasta_path, contig_order, sorted_read_final_paths,
                                               progress_every_n)
     try:
         correct_alignments_main(
-            fasta_path, contig_order, contig_queues, sorted_read_final_paths,
-            indexed_orig_sam_paths, alignment_batch_size, aligner_inputs,
-            writer_progress, has_writer_thread, writer_thread, aligner_threads,
-            aligner_outputs, output_sam_paths, buffered_writes_by_file_path,
-            progress_every_n, parasail_api, aligner_window_size)
+            fasta_path, full_contig_order, contig_order, contig_queues,
+            sorted_read_final_paths, indexed_orig_sam_paths,
+            alignment_batch_size, aligner_inputs, writer_progress,
+            has_writer_thread, writer_thread, aligner_threads, aligner_outputs,
+            output_sam_paths, buffered_writes_by_file_path, progress_every_n,
+            parasail_api, aligner_window_size, junction_cigar_only,
+            aggregate_output_by_sample, sample_out_file_mapping)
     finally:
         correct_alignments_cleanup(aligner_threads, aligner_inputs,
                                    aligner_outputs, aligner_signals,
@@ -1571,20 +1958,25 @@ def correct_alignments(fasta_path, contig_order, sorted_read_final_paths,
                                    writer_signal, contig_queues)
 
 
-def correct_alignments_main(fasta_path, contig_order, contig_queues,
-                            sorted_read_final_paths, indexed_orig_sam_paths,
-                            alignment_batch_size, aligner_inputs,
-                            writer_progress, has_writer_thread, writer_thread,
-                            aligner_threads, aligner_outputs, output_sam_paths,
-                            buffered_writes_by_file_path, progress_every_n,
-                            parasail_api, aligner_window_size):
+def correct_alignments_main(
+        fasta_path, full_contig_order, contig_order, contig_queues,
+        sorted_read_final_paths, indexed_orig_sam_paths, alignment_batch_size,
+        aligner_inputs, writer_progress, has_writer_thread, writer_thread,
+        aligner_threads, aligner_outputs, output_sam_paths,
+        buffered_writes_by_file_path, progress_every_n, parasail_api,
+        aligner_window_size, junction_cigar_only, aggregate_output_by_sample,
+        sample_out_file_mapping):
     main_thread_contig_queue = contig_queues[-1]
     num_corrections_started = 0
     contig_cache = create_contig_cache(main_thread_contig_queue)
+    correct_arguments = None
     with open(fasta_path, 'rt') as fasta_handle:
         fasta_details = {'handle': fasta_handle, 'next_line': None}
-        for contig_name in contig_order:
+        for contig_name in full_contig_order:
             contig_sequence = read_contig(fasta_details, contig_name)
+            if contig_name not in contig_order:
+                continue  # contig not assigned to this job
+
             contig_cache_entry = {
                 'name': contig_name,
                 'sequence': contig_sequence
@@ -1609,9 +2001,13 @@ def correct_alignments_main(fasta_path, contig_order, contig_queues,
 
                     previous_line = read_final_line
                     read_final = parse_sorted_read_final_line(read_final_line)
-                    orig_alignment = find_orig_alignment(
-                        read_final, indexed_orig_sam_paths,
-                        alignment_batch_size)
+                    if junction_cigar_only and aggregate_output_by_sample:
+                        orig_alignment = None
+                    else:
+                        orig_alignment = find_orig_alignment(
+                            read_final, indexed_orig_sam_paths,
+                            alignment_batch_size)
+
                     correct_arguments = {
                         'read_final': read_final,
                         'orig_alignment': orig_alignment,
@@ -1636,14 +2032,17 @@ def correct_alignments_main(fasta_path, contig_order, contig_queues,
                             aligner_outputs, output_sam_paths,
                             buffered_writes_by_file_path, alignment_batch_size,
                             progress_every_n, contig_cache, parasail_api,
-                            aligner_window_size)
+                            aligner_window_size, junction_cigar_only,
+                            aggregate_output_by_sample,
+                            sample_out_file_mapping)
 
     process_corrections_from_main_thread(
         correct_arguments, writer_progress, num_corrections_started,
         has_writer_thread, writer_thread, aligner_threads, aligner_inputs,
         aligner_outputs, output_sam_paths, buffered_writes_by_file_path,
         alignment_batch_size, progress_every_n, contig_cache, parasail_api,
-        aligner_window_size)
+        aligner_window_size, junction_cigar_only, aggregate_output_by_sample,
+        sample_out_file_mapping)
 
     print_with_timestamp('Corrected {} alignments'.format(
         writer_progress.value))
@@ -1833,6 +2232,201 @@ class ParasailApi:
         self.matrix_free(self.score_matrix_p)
 
 
+def find_output_sam_paths(out_dir):
+    sams_by_basename = dict()
+    file_names = os.listdir(out_dir)
+    for file_name in file_names:
+        if not file_name.isdigit():
+            continue
+
+        job_dir = os.path.join(out_dir, file_name)
+        if not os.path.isdir(job_dir):
+            continue
+
+        job_file_names = os.listdir(job_dir)
+        for job_file_name in job_file_names:
+            if not job_file_name.endswith('.sam'):
+                continue
+
+            sams = sams_by_basename.get(job_file_name)
+            if not sams:
+                sams = list()
+                sams_by_basename[job_file_name] = sams
+
+            path = os.path.join(job_dir, job_file_name)
+            sams.append(path)
+
+    return sams_by_basename
+
+
+def distribute_contigs_to_jobs(num_jobs, contig_order):
+    if len(contig_order) < num_jobs:
+        print('{} jobs requested, but only {} contigs'.format(
+            num_jobs, len(contig_order)))
+
+    contigs_for_jobs = list()
+    for _ in range(num_jobs):
+        contigs_for_jobs.append(list())
+
+    job_i = 0
+    for contig in contig_order:
+        if job_i == num_jobs:
+            job_i = 0
+
+        contigs_for_jobs[job_i].append(contig)
+        job_i += 1
+
+    return contigs_for_jobs
+
+
+def stage_1_out_path(out_dir):
+    return os.path.join(out_dir, 'stage_1.out')
+
+
+def write_stage_1_output(num_jobs, contig_order, contig_lengths, sample_names,
+                         sample_out_file_mapping, indexed_orig_sam_paths,
+                         sorted_read_final_paths, out_dir):
+    path = stage_1_out_path(out_dir)
+    contigs_for_jobs = distribute_contigs_to_jobs(num_jobs, contig_order)
+    with open(path, 'wt') as handle:
+        samples_json = json.dumps(sample_names)
+        handle.write('{}\n'.format(samples_json))
+        sample_out_json = json.dumps(sample_out_file_mapping)
+        handle.write('{}\n'.format(sample_out_json))
+        lengths_json = json.dumps(contig_lengths)
+        handle.write('{}\n'.format(lengths_json))
+        sam_index_json = json.dumps(indexed_orig_sam_paths)
+        handle.write('{}\n'.format(sam_index_json))
+        read_final_json = json.dumps(sorted_read_final_paths)
+        handle.write('{}\n'.format(read_final_json))
+        full_contig_json = json.dumps(contig_order)
+        handle.write('{}\n'.format(full_contig_json))
+        for contigs in contigs_for_jobs:
+            contig_json = json.dumps(contigs)
+            handle.write('{}\n'.format(contig_json))
+
+    print_with_timestamp(
+        'stage 1 output written for --job-i 0 to {}'.format(num_jobs - 1))
+
+
+def load_stage_1_output(job_i, out_dir):
+    loaded = dict()
+    path = stage_1_out_path(out_dir)
+    target_contig_line_i = 6 + job_i
+    with open(path, 'rt') as handle:
+        for line_i, line in enumerate(handle):
+            if line_i == 0:
+                sample_names = json.loads(line)
+                loaded['sample_names'] = sample_names
+                continue
+            if line_i == 1:
+                sample_out_file_mapping = json.loads(line)
+                loaded['sample_out_file_mapping'] = sample_out_file_mapping
+                continue
+            if line_i == 2:
+                contig_lengths = json.loads(line)
+                loaded['contig_lengths'] = contig_lengths
+                continue
+            if line_i == 3:
+                indexed_orig_sam_paths = json.loads(line)
+                loaded['indexed_orig_sam_paths'] = indexed_orig_sam_paths
+                continue
+            if line_i == 4:
+                sorted_read_final_paths = json.loads(line)
+                loaded['sorted_read_final_paths'] = sorted_read_final_paths
+                continue
+            if line_i == 5:
+                full_contig_order = json.loads(line)
+                loaded['full_contig_order'] = full_contig_order
+                continue
+            if line_i == target_contig_line_i:
+                contig_order = json.loads(line)
+                loaded['contig_order'] = contig_order
+                break
+
+    expected_keys = {
+        'sample_names', 'sample_out_file_mapping', 'contig_lengths',
+        'indexed_orig_sam_paths', 'sorted_read_final_paths',
+        'full_contig_order', 'contig_order'
+    }
+    actual_keys = set(loaded.keys())
+    if actual_keys != expected_keys:
+        raise Exception('expected {}, but got {}'.format(
+            expected_keys, actual_keys))
+
+    print_with_timestamp('job {} running for {}'.format(job_i, contig_order))
+    return loaded
+
+
+def stage_1(out_dir, fasta, samples_tsv, espresso_out_dir, num_threads,
+            sort_memory_buffer_size, num_jobs, aggregate_output_by_sample,
+            require_orig_alignments):
+    create_out_directories(out_dir)
+    contig_details = get_contig_order_from_fasta(fasta)
+    contig_order = contig_details['order']
+    contig_lengths = contig_details['lengths']
+    orig_paths_to_sample = parse_samples_tsv(samples_tsv)
+    orig_sam_or_bam_paths = sorted(orig_paths_to_sample.keys())
+    sample_names = sorted(set(orig_paths_to_sample.values()))
+    indexed_orig_sam_paths = None
+    if require_orig_alignments:
+        indexed_orig_sam_paths = index_sam_or_bam_paths(
+            orig_sam_or_bam_paths, out_dir, num_threads)
+
+    sample_out_file_mapping = None
+    if aggregate_output_by_sample:
+        sample_out_file_mapping = create_sample_out_file_mapping(
+            sample_names, out_dir)
+
+    orig_read_final_paths = find_read_final_paths(espresso_out_dir)
+    sorted_read_final_paths = parse_and_sort_read_final_paths(
+        orig_read_final_paths, out_dir, sort_memory_buffer_size, num_threads)
+    write_stage_1_output(num_jobs, contig_order, contig_lengths, sample_names,
+                         sample_out_file_mapping, indexed_orig_sam_paths,
+                         sorted_read_final_paths, out_dir)
+
+
+def stage_2(libparasail_so_path, job_i, out_dir, fasta, alignment_batch_size,
+            aligner_window_size, progress_every_n, num_threads,
+            junction_cigar_only, aggregate_output_by_sample):
+    loaded = load_stage_1_output(job_i, out_dir)
+    # sample_names = loaded['sample_names']
+    sample_out_file_mapping = loaded['sample_out_file_mapping']
+    contig_lengths = loaded['contig_lengths']
+    indexed_orig_sam_paths = loaded['indexed_orig_sam_paths']
+    sorted_read_final_paths = loaded['sorted_read_final_paths']
+    full_contig_order = loaded['full_contig_order']
+    contig_order = loaded['contig_order']
+    output_sam_paths = create_output_sams(job_i, indexed_orig_sam_paths,
+                                          full_contig_order, out_dir,
+                                          aggregate_output_by_sample,
+                                          sample_out_file_mapping,
+                                          contig_lengths)
+
+    if not contig_order:
+        return
+
+    parasail_api = None
+    if not junction_cigar_only:
+        parasail_api = ParasailApi(libparasail_so_path)
+
+    correct_alignments(fasta, full_contig_order, contig_order,
+                       sorted_read_final_paths, indexed_orig_sam_paths,
+                       output_sam_paths, alignment_batch_size, parasail_api,
+                       aligner_window_size, progress_every_n, num_threads,
+                       junction_cigar_only, aggregate_output_by_sample,
+                       sample_out_file_mapping)
+    if not junction_cigar_only:
+        parasail_api.cleanup_parameters()
+
+
+def stage_3(out_dir, num_threads):
+    sams_by_basename = find_output_sam_paths(out_dir)
+    sort_output_sams(sams_by_basename, num_threads)
+    merge_output_sams(out_dir, sams_by_basename, num_threads)
+    cleanup_temp_files(out_dir)
+
+
 def main():
     args = parse_args()
 
@@ -1840,28 +2434,26 @@ def main():
     abs_fasta = os.path.abspath(args.fasta)
     abs_samples_tsv = os.path.abspath(args.samples_tsv)
     abs_espresso_out_dir = os.path.abspath(args.espresso_out_dir)
+    require_orig_alignments = True
+    if args.aggregate_output_by_sample and args.junction_cigar_only:
+        require_orig_alignments = False
 
-    parasail_api = ParasailApi(args.libparasail_so_path)
+    if args.stage in ['1', 'all']:
+        stage_1(abs_out_dir, abs_fasta, abs_samples_tsv, abs_espresso_out_dir,
+                args.num_threads, args.sort_memory_buffer_size, args.num_jobs,
+                args.aggregate_output_by_sample, require_orig_alignments)
 
-    create_out_directories(abs_out_dir)
-    contig_order = get_contig_order_from_fasta(abs_fasta)
-    orig_sam_or_bam_paths = parse_samples_tsv(abs_samples_tsv)
-    indexed_orig_sam_paths = index_sam_or_bam_paths(orig_sam_or_bam_paths,
-                                                    abs_out_dir,
-                                                    args.num_threads)
-    orig_read_final_paths = find_read_final_paths(abs_espresso_out_dir)
-    sorted_read_final_paths = parse_and_sort_read_final_paths(
-        orig_read_final_paths, abs_out_dir, args.sort_memory_buffer_size)
-    output_sam_paths = create_output_sams(indexed_orig_sam_paths, contig_order,
-                                          abs_out_dir)
-    correct_alignments(abs_fasta, contig_order, sorted_read_final_paths,
-                       indexed_orig_sam_paths, output_sam_paths,
-                       args.alignment_batch_size, parasail_api,
-                       args.aligner_window_size, args.progress_every_n,
-                       args.num_threads)
-    sort_output_sams(output_sam_paths, args.num_threads)
-    parasail_api.cleanup_parameters()
-    cleanup_temp_files(abs_out_dir)
+    if args.stage in ['2', 'all']:
+        stage_2(args.libparasail_so_path, args.job_i, abs_out_dir, abs_fasta,
+                args.alignment_batch_size, args.aligner_window_size,
+                args.progress_every_n, args.num_threads,
+                args.junction_cigar_only, args.aggregate_output_by_sample)
+
+    if args.stage in ['3', 'all']:
+        stage_3(abs_out_dir, args.num_threads)
+
+    print_with_timestamp('job {} finished stage {}'.format(
+        args.job_i, args.stage))
 
 
 if __name__ == '__main__':

@@ -6,8 +6,9 @@ use warnings;
 use File::Basename qw(dirname);
 use File::Temp qw(tempfile);
 use IPC::Open3;
+use Storable;
 
-my $version_number = '1.5.0';
+my $version_number = '1.6.0';
 
 sub get_version_number {
     return $version_number;
@@ -88,6 +89,16 @@ sub check_samtools_version {
   my $required_version = '1.6';
   if (!check_version_at_least([\@parsed_version, $required_version])) {
     return "samtools must be at least version ($required_version), but found ($version_string)";
+  }
+  return "";
+}
+
+sub check_storable_version {
+  my $version_string = $Storable::VERSION;
+  my @parsed_version = parse_version_string($version_string);
+  my $required_version = '3';
+  if (!check_version_at_least([\@parsed_version, $required_version])) {
+    return "Storable should be at least version ($required_version), but found ($version_string)";
   }
   return "";
 }

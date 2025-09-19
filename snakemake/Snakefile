@@ -30,8 +30,8 @@ def all_input(wildcards):
         inputs.update(vis_dirs)
 
     if config['output_corrected_sam_files']:
-        inputs['corrected_sam_paths'] = os.path.join(
-            'espresso_out', 'corrected_alignments', 'sam_file_name_mapping.txt')
+        inputs['corrected_sams_done'] = os.path.join(
+            'espresso_out', 'corrected_alignments', 'done.txt')
 
     return inputs
 
@@ -618,11 +618,57 @@ rule combine_c_summary_files:
         ' 2> {log.err}'
 
 
-def create_corrected_sams_input(wildcards):
+def create_corrected_sams_stage_1_input(wildcards):
     inputs = combine_c_for_q_input(wildcards)
     inputs['fasta'] = os.path.join('references', config['fasta_name'])
     inputs['samples_tsv'] = os.path.join('espresso_out', 'samples.tsv')
     return inputs
+
+
+def create_corrected_sams_stage_3_input(wildcards):
+    num_jobs_param = int(config.get('correction_num_jobs', 1))
+    inputs = dict()
+    out_dir = os.path.join('espresso_out', 'corrected_alignments')
+    for job_i in range(num_jobs_param):
+        job_str = str(job_i)
+        stage_2_dir = os.path.join(out_dir, job_str)
+        inputs[job_str] = stage_2_dir
+
+    inputs['fasta'] = os.path.join('references', config['fasta_name'])
+    inputs['samples_tsv'] = os.path.join('espresso_out', 'samples.tsv')
+    return inputs
+
+
+def maybe_create_corrected_sams_junction_only_param():
+    junc_param = config.get('correction_junction_cigar_only')
+    if junc_param:
+        return '--junction-cigar-only'
+
+    return ''
+
+
+def maybe_create_corrected_sams_aggregate_param():
+    agg_param = config.get('correction_aggregate_by_sample')
+    if agg_param:
+        return '--aggregate-output-by-sample'
+
+    return ''
+
+
+def maybe_create_corrected_sams_num_jobs_param():
+    num_jobs_param = config.get('correction_num_jobs')
+    if num_jobs_param:
+        return '--num-jobs {}'.format(num_jobs_param)
+
+    return ''
+
+
+def maybe_create_corrected_sams_batch_param():
+    batch_param = config.get('correction_batch_size')
+    if batch_param:
+        return '--alignment-batch-size {}'.format(batch_param)
+
+    return ''
 
 
 def maybe_create_corrected_sams_window_param():
@@ -633,35 +679,138 @@ def maybe_create_corrected_sams_window_param():
     return '--aligner-window-size {}'.format(window_param)
 
 
-rule create_corrected_sams:
+def maybe_create_corrected_sams_parasail_param():
+    parasail_param = config.get('libparasail_so_path')
+    if parasail_param:
+        return '--libparasail-so-path {}'.format(parasail_param)
+
+    return ''
+
+
+rule create_corrected_sams_stage_1:
     input:
-        unpack(create_corrected_sams_input),
+        unpack(create_corrected_sams_stage_1_input),
     output:
-        mapping=os.path.join('espresso_out', 'corrected_alignments',
-                             'sam_file_name_mapping.txt'),
+        stage_1=os.path.join('espresso_out', 'corrected_alignments',
+                             'stage_1.out'),
     log:
-        out=os.path.join('espresso_out', 'create_corrected_sams_log.out'),
-        err=os.path.join('espresso_out', 'create_corrected_sams_log.err'),
+        out=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_1_log.out'),
+        err=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_1_log.err'),
     params:
         conda_wrapper=config['conda_wrapper'],
         script=os.path.join('scripts', 'create_corrected_sam.py'),
         c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
-        out_dir=lambda wildcards, output: os.path.dirname(output.mapping),
-        parasail_so=config.get('libparasail_so_path'),
-        window_param=maybe_create_corrected_sams_window_param(),
-    threads: config['create_corrected_sams_threads']
+        out_dir=lambda wildcards, output: os.path.dirname(output.stage_1),
+        junc_only=maybe_create_corrected_sams_junction_only_param(),
+        aggregate=maybe_create_corrected_sams_aggregate_param(),
+        num_jobs=maybe_create_corrected_sams_num_jobs_param(),
+        batch_size=maybe_create_corrected_sams_batch_param(),
+    threads: config['create_corrected_sams_stage_1_threads']
     resources:
-        mem_mb=config['create_corrected_sams_mem_gb'] * 1024,
-        time_hours=config['create_corrected_sams_time_hr'],
+        mem_mb=config['create_corrected_sams_stage_1_mem_gb'] * 1024,
+        time_hours=config['create_corrected_sams_stage_1_time_hr'],
     shell:
         '{params.conda_wrapper} python {params.script}'
         ' --samples-tsv {input.samples_tsv}'
         ' --espresso-out-dir {params.c_work_dir}'
         ' --out-dir {params.out_dir}'
         ' --fasta {input.fasta}'
-        ' --libparasail-so-path {params.parasail_so}'
-        ' {params.window_param}'
         ' --num-threads {threads}'
+        ' --stage 1'
+        ' {params.junc_only}'
+        ' {params.aggregate}'
+        ' {params.batch_size}'
+        ' {params.num_jobs}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
+
+rule create_corrected_sams_stage_2:
+    input:
+        stage_1=os.path.join('espresso_out', 'corrected_alignments',
+                             'stage_1.out'),
+        fasta=os.path.join('references', config['fasta_name']),
+        samples_tsv=os.path.join('espresso_out', 'samples.tsv'),
+    output:
+        stage_2=directory(os.path.join('espresso_out', 'corrected_alignments',
+                                       '{job_i}')),
+    log:
+        out=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_2_{job_i}_log.out'),
+        err=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_2_{job_i}_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'create_corrected_sam.py'),
+        c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
+        out_dir=lambda wildcards, input: os.path.dirname(input.stage_1),
+        junc_only=maybe_create_corrected_sams_junction_only_param(),
+        aggregate=maybe_create_corrected_sams_aggregate_param(),
+        num_jobs=maybe_create_corrected_sams_num_jobs_param(),
+        batch_size=maybe_create_corrected_sams_batch_param(),
+        parasail=maybe_create_corrected_sams_parasail_param(),
+        window_param=maybe_create_corrected_sams_window_param(),
+    threads: config['create_corrected_sams_stage_2_threads']
+    resources:
+        mem_mb=config['create_corrected_sams_stage_2_mem_gb'] * 1024,
+        time_hours=config['create_corrected_sams_stage_2_time_hr'],
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --samples-tsv {input.samples_tsv}'
+        ' --espresso-out-dir {params.c_work_dir}'
+        ' --out-dir {params.out_dir}'
+        ' --fasta {input.fasta}'
+        ' --num-threads {threads}'
+        ' --stage 2'
+        ' --job-i {wildcards.job_i}'
+        ' {params.junc_only}'
+        ' {params.aggregate}'
+        ' {params.batch_size}'
+        ' {params.num_jobs}'
+        ' {params.parasail}'
+        ' {params.window_param}'
+        ' 1> {log.out}'
+        ' 2> {log.err}'
+
+
+rule create_corrected_sams_stage_3:
+    input:
+        unpack(create_corrected_sams_stage_3_input),
+    output:
+        done=touch(os.path.join('espresso_out', 'corrected_alignments',
+                                'done.txt')),
+    log:
+        out=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_3_log.out'),
+        err=os.path.join('espresso_out',
+                         'create_corrected_sams_stage_3_log.err'),
+    params:
+        conda_wrapper=config['conda_wrapper'],
+        script=os.path.join('scripts', 'create_corrected_sam.py'),
+        c_work_dir=os.path.join('espresso_out', 'c_work_dir'),
+        out_dir=lambda wildcards, output: os.path.dirname(output.done),
+        junc_only=maybe_create_corrected_sams_junction_only_param(),
+        aggregate=maybe_create_corrected_sams_aggregate_param(),
+        num_jobs=maybe_create_corrected_sams_num_jobs_param(),
+        batch_size=maybe_create_corrected_sams_batch_param(),
+    threads: config['create_corrected_sams_stage_3_threads']
+    resources:
+        mem_mb=config['create_corrected_sams_stage_3_mem_gb'] * 1024,
+        time_hours=config['create_corrected_sams_stage_3_time_hr'],
+    shell:
+        '{params.conda_wrapper} python {params.script}'
+        ' --samples-tsv {input.samples_tsv}'
+        ' --espresso-out-dir {params.c_work_dir}'
+        ' --out-dir {params.out_dir}'
+        ' --fasta {input.fasta}'
+        ' --num-threads {threads}'
+        ' --stage 3'
+        ' {params.junc_only}'
+        ' {params.aggregate}'
+        ' {params.batch_size}'
+        ' {params.num_jobs}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
