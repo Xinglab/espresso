@@ -75,6 +75,7 @@ reference_files:
 # (sample_1_rep_1, sample_1_rep_2, ...) to have the abundance counted separately.
 # Alternatively, replicates can be listed under the same sample name to combine
 # the counts in the final output.
+input_alignments_are_sorted: false
 samples:
   sample_1_name:
     - fastq: '/path/to/file.fastq'

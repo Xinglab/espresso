@@ -85,36 +85,55 @@ def get_combined_fastq_path_from_wildcards(wildcards):
                         str(sample_config['input_i']), 'combined.fastq')
 
 
-def get_sam_path_from_wildcards(wildcards):
-    sample_config = get_sample_input_config_from_wildcards(wildcards)
-    configured_sam = sample_config['input'].get('sam')
+def get_sam_or_bam_from_sample_input(sample_input):
+    configured_sam = sample_input.get('sam')
     if configured_sam is not None:
         return configured_sam
+
+    configured_bam = sample_input.get('bam')
+    if configured_bam is not None:
+        return configured_bam
+
+    return None
+
+
+def get_align_path_from_wildcards(wildcards):
+    sample_config = get_sample_input_config_from_wildcards(wildcards)
+    sam_or_bam = get_sam_or_bam_from_sample_input(sample_config['input'])
+    if sam_or_bam:
+        return sam_or_bam
 
     return os.path.join('alignment', sample_config['name'],
                         str(sample_config['input_i']), 'aligned.sam')
 
 
-def get_bam_path_from_wildcards(wildcards):
-    sample_config = get_sample_input_config_from_wildcards(wildcards)
-    configured_bam = sample_config['input'].get('bam')
-    if configured_bam is not None:
-        return configured_bam
-
-    return UNSATISFIABLE_INPUT
-
-
-def espresso_s_input_sams():
-    sams = list()
+def espresso_s_input_alignment_details():
+    is_sorted = config.get('input_alignments_are_sorted')
+    details = list()
     # config['samples'] is an unordered dictionary. Sort to be consistent.
     for sample_name in sorted(config['samples']):
         sample_inputs = config['samples'][sample_name]
         for i in range(len(sample_inputs)):
-            sam = os.path.join('alignment', sample_name, str(i),
-                               'aligned.sorted.sam'),
-            sams.append(sam)
+            if is_sorted:
+                sample_input = sample_inputs[i]
+                path = get_sam_or_bam_from_sample_input(sample_input)
+            else:
+                path = os.path.join('alignment', sample_name, str(i),
+                                    'aligned.sorted.bam')
 
-    return sams
+            details.append({'name': sample_name, 'path': path})
+
+    return details
+
+
+def espresso_s_input_alignment_paths():
+    details = espresso_s_input_alignment_details()
+    paths = list()
+    for detail in details:
+        path = detail['path']
+        paths.append(path)
+
+    return paths
 
 
 def reference_file_wildcard_constraints():
@@ -313,9 +332,6 @@ def maybe_junc_bed_param(wildcards, input):
     return '--junc-bed {}'.format(input.bed)
 
 
-# If a bam file is configured then use it
-ruleorder: convert_bam_to_sam_with_samtools > align_with_minimap2
-
 rule align_with_minimap2:
     input:
         unpack(align_with_minimap2_input),
@@ -352,36 +368,12 @@ rule align_with_minimap2:
         ' 1> {output.sam}'
         ' 2> {log.err}'
 
-rule convert_bam_to_sam_with_samtools:
-    input:
-        bam=get_bam_path_from_wildcards,
-    output:
-        sam=os.path.join('alignment', '{sample}', '{sample_input_i}',
-                         'aligned.sam'),
-    log:
-        out=os.path.join('alignment', '{sample}', '{sample_input_i}',
-                         'convert_bam_to_sam_with_samtools_log.out'),
-        err=os.path.join('alignment', '{sample}', '{sample_input_i}',
-                         'convert_bam_to_sam_with_samtools_log.err'),
-    params:
-        conda_wrapper=config['conda_wrapper'],
-    resources:
-        mem_mb=DEFAULT_MEM_MB,
-        time_hours=DEFAULT_TIME_HOURS,
-    shell:
-        '{params.conda_wrapper} samtools view'
-        ' -h'
-        ' -o {output.sam}'
-        ' {input.bam}'
-        ' 1> {log.out}'
-        ' 2> {log.err}'
-
 rule sort_with_samtools:
     input:
-        unsorted_sam=get_sam_path_from_wildcards,
+        unsorted_align=get_align_path_from_wildcards,
     output:
-        sorted_sam=os.path.join('alignment', '{sample}', '{sample_input_i}',
-                                'aligned.sorted.sam'),
+        sorted_bam=os.path.join('alignment', '{sample}', '{sample_input_i}',
+                                'aligned.sorted.bam'),
     log:
         out=os.path.join('alignment', '{sample}', '{sample_input_i}',
                          'sort_with_samtools_log.out'),
@@ -394,8 +386,8 @@ rule sort_with_samtools:
         time_hours=DEFAULT_TIME_HOURS,
     shell:
         '{params.conda_wrapper} samtools sort'
-        ' -o {output.sorted_sam}'
-        ' {input.unsorted_sam}'
+        ' -o {output.sorted_bam}'
+        ' {input.unsorted_align}'
         ' 1> {log.out}'
         ' 2> {log.err}'
 
@@ -404,20 +396,15 @@ rule write_espresso_s_input_file:
     output:
         s_input=os.path.join('espresso_out', 'run_espresso_s_input.txt'),
     run:
-        import os.path
-        sams = list()
         names = list()
-        # config['samples'] is an unordered dictionary. Sort to be consistent.
-        for sample_name in sorted(config['samples']):
-            sample_inputs = config['samples'][sample_name]
-            names.extend([sample_name] * len(sample_inputs))
-            for i in range(len(sample_inputs)):
-                sam = os.path.join('alignment', sample_name, str(i),
-                                   'aligned.sorted.sam')
-                sams.append(sam)
+        paths = list()
+        details = espresso_s_input_alignment_details()
+        for detail in details:
+            names.append(detail['name'])
+            paths.append(detail['path'])
 
         with open(output[0], 'wt') as handle:
-            handle.write('{}\n'.format(','.join(sams)))
+            handle.write('{}\n'.format(','.join(paths)))
             handle.write('{}\n'.format(','.join(names)))
 
 
@@ -433,7 +420,7 @@ rule run_espresso_s:
         s_input=os.path.join('espresso_out', 'run_espresso_s_input.txt'),
         fasta=os.path.join('references', config['fasta_name']),
         gtf=os.path.join('references', config['gtf_name']),
-        sams=espresso_s_input_sams(),
+        aligns=espresso_s_input_alignment_paths(),
     output:
         samples_tsv=os.path.join('espresso_out', 'samples.tsv'),
         updated_tsv=os.path.join('espresso_out', 's_work_dir',
